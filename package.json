@@ -1,0 +1,14 @@
+{
+  "name": "kurv",
+  "private": true,
+  "description": "Tests for the single-file app in site/. Nothing here is deployed.",
+  "scripts": {
+    "test": "node tests/lptest.js && node tests/dietest.js && node tests/smoke.js && node tests/migrate.js"
+  },
+  "devDependencies": {
+    "jsdom": "^26.0.0"
+  },
+  "dependencies": {
+    "playwright": "^1.65.1"
+  }
+}
