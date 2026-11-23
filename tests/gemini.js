@@ -5,6 +5,7 @@ const html = require("fs").readFileSync(path.join(__dirname, "..", "site", "inde
 
 let script = {};          // model -> what that model does
 let calls = [];
+let auths = [];
 function reply(status, body) {
   return Promise.resolve({ ok: status >= 200 && status < 300, status,
     text: () => Promise.resolve(typeof body === "string" ? body : JSON.stringify(body)) });
@@ -33,6 +34,7 @@ const dom = new JSDOM(html, {
       }
       const model = decodeURIComponent(u.match(/models\/([^:]+):/)[1]);
       calls.push(model);
+      auths.push(u.includes("key=") ? "query" : (opts.headers && opts.headers["x-goog-api-key"] ? "header" : "none"));
       const act = script[model] || script["*"];
       if (!act) return reply(404, { error: { message: "models/" + model + " is not found" } });
       return act(opts);
@@ -69,8 +71,9 @@ setTimeout(async () => {
   S.nut.lastModel = "";
   script = { "*": () => reply(400, { error: { message: "API key not valid. Please pass a valid API key." } }) };
   calls = []; r = await ask();
-  console.log("3. bad key:            calls " + calls.join(" > ") + "  | " + r.err);
-  if (calls.length !== 1) errors.push("3: kept trying after a bad key");
+  console.log("3. bad key:            calls " + calls.join(" > ") + " (" + auths.slice(-2).join(", ") + ")  | " + r.err.slice(0, 90) + "…");
+  // One model, tried in the header and then in the address — then it stops.
+  if (calls.length !== 2 || calls[0] !== calls[1]) errors.push("3: should try one model both ways, then stop");
 
   // 4. junk reply, safety block, then good
   script = { a: () => reply(200, { candidates: [{ finishReason: "STOP", content: { parts: [{ text: "Sure! Eggs are healthy." }] } }] }),
@@ -113,9 +116,23 @@ setTimeout(async () => {
   if (r.err || r.info.model !== "gemini-2.5-flash") errors.push("7b: did not self-heal via discovery");
 
   // 8. a list from before the chain: one old model field, no list
-  S.nut.models = ""; S.nut.model = "gemini-1.5-flash"; S.nut.lastModel = "";
+  S.nut.models = ""; S.nut.model = "gemini-2.5-flash-lite"; S.nut.lastModel = "";
   console.log("8. legacy single model -> " + app.geminiModels().join(", "));
-  if (app.geminiModels()[0] !== "gemini-1.5-flash") errors.push("8: legacy model not kept first");
+  if (app.geminiModels()[0] !== "gemini-2.5-flash-lite") errors.push("8: legacy model not kept first");
+  // 8b. shut-down names are dropped from a saved list, and defaults are current
+  S.nut.models = "gemini-2.0-flash, gemini-1.5-pro, gemini-3.8-flash, gemini-2.0-flash-lite"; S.nut.model = "";
+  console.log("8b. saved list with dead names -> " + app.geminiModels().join(", "));
+  if (app.geminiModels().join() !== "gemini-3.8-flash") errors.push("8b: retired names not stripped");
+  S.nut.models = "";
+  console.log("8c. built-in defaults -> " + app.geminiModels().join(", "));
+  if (app.geminiModels()[0] !== "gemini-3.8-flash" || app.geminiModels().some((m) => /2\.0/.test(m)))
+    errors.push("8c: defaults not current");
+  // 8d. an ordinary lookup sends the key in the header, never in the address
+  S.nut.models = "a"; S.nut.lastModel = ""; S.nut.authMode = "";
+  script = { a: () => good({ kcal: 3 }) };
+  auths = []; await ask();
+  console.log("8d. ordinary lookup sends the key by: " + auths.join(", "));
+  if (auths.join() !== "header") errors.push("8d: key not sent in the header");
 
   // 9. discovery orders and filters
   S.nut.model = "";
@@ -125,17 +142,17 @@ setTimeout(async () => {
     errors.push("9: discovery order or filter wrong");
 
   // 10. the settings screen shows the chain and the button
-  S.nut.models = "gemini-2.5-flash, gemini-2.0-flash";
+  S.nut.models = "gemini-3.6-flash, gemini-3.8-flash";
   w.document.querySelector('nav button[data-tab="plan"]').click();
   w.document.querySelector('#p-plan [data-act="openFoods"]').click();
   const box = w.document.querySelector("#gemModels");
   console.log("10. settings field:    \"" + (box && box.value) + "\" + button " +
     (w.document.querySelector('[data-act="findModels"]') ? "present" : "MISSING"));
-  box.value = "gemini-2.0-flash, gemini-2.5-flash";
-  S.nut.lastModel = "gemini-2.5-flash";
+  box.value = "gemini-3.8-flash, gemini-3.6-flash";
+  S.nut.lastModel = "gemini-3.6-flash";
   box.dispatchEvent(new w.Event("input", { bubbles: true }));
   console.log("    hand edit resets pin: lastModel=\"" + S.nut.lastModel + "\" -> order " + app.geminiModels().join(", "));
-  if (app.geminiModels()[0] !== "gemini-2.0-flash") errors.push("10: hand-edited order not respected");
+  if (app.geminiModels()[0] !== "gemini-3.8-flash") errors.push("10: hand-edited order not respected");
 
   console.log("\n==== errors: " + (errors.length ? "\n" + errors.join("\n") : "none"));
   process.exit(errors.length ? 1 : 0);

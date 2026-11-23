@@ -4270,10 +4270,24 @@ function recipeFormHTML(r) {
  * whole pass fails only on transient things (busy, rate limited, timeout), it
  * waits a moment and goes round once more before giving up.
  */
+/*
+ * Current as of November 2026, from Google's models and deprecations pages.
+ * The 2.0 family was shut down on 1 June 2026 and answers 404 now. Flash comes
+ * first: a nutrition lookup does not need the big model, and flash has the
+ * most free quota. Argon is the newest and most capable, so it is the last
+ * resort rather than the default — it is also the most expensive.
+ *
+ * None of this is load-bearing: when every name here is gone, the app asks
+ * Google for the current list on its own.
+ */
 var GEMINI_DEFAULT_MODELS = [
-  "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash",
-  "gemini-2.0-flash-lite", "gemini-2.5-pro",
+  "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite",
+  "gemini-3.1-flash-lite", "gemini-2.5-flash", "gemini-4-argon",
 ];
+
+// Names Google has shut down. Stripped from any saved list so an old list
+// does not spend a request on each of them every time.
+var GEMINI_RETIRED = /^gemini-(1\.0|1\.5|2\.0)(-|$)|^gemini-2\.5-.*preview|^gemini-3-pro-preview$|^gemini-3\.1-flash-lite-preview$/;
 var GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/";
 
 function geminiModels() {
@@ -4284,8 +4298,10 @@ function geminiModels() {
   if (!list.length) list = (nut.model ? [nut.model] : []).concat(GEMINI_DEFAULT_MODELS);
   if (nut.lastModel) list.unshift(nut.lastModel);
   var seen = {}, out = [];
-  list.forEach(function (m) { if (m && !seen[m]) { seen[m] = 1; out.push(m); } });
-  return out;
+  list.forEach(function (m) {
+    if (m && !seen[m] && !GEMINI_RETIRED.test(m)) { seen[m] = 1; out.push(m); }
+  });
+  return out.length ? out : GEMINI_DEFAULT_MODELS.slice();
 }
 
 /*
@@ -4311,10 +4327,16 @@ function geminiReason(body) {
 
 function geminiClassify(status, msg, reason) {
   var m = String(msg || ""), r = String(reason || "");
+  if (r === "ACCESS_TOKEN_TYPE_UNSUPPORTED" || /invalid authentication credentials|expected oauth/i.test(m)) {
+    return { fatal: true, why: "Google would not accept this kind of key",
+      fix: "Both ways of sending it were tried. Make a fresh key at aistudio.google.com/apikey, " +
+        "leave its default name, and paste it without quotes or spaces." };
+  }
   if (r === "API_KEY_INVALID" || /api[ _-]?key not valid/i.test(m)) {
     return { fatal: true, why: "the key is not valid",
-      fix: "Usually a copy-paste problem. Copy it again from aistudio.google.com/apikey — " +
-        "a Gemini key starts with AIza and is 39 characters long." };
+      fix: "Both ways of sending it were tried, so it is the key itself — usually a copy-paste " +
+        "problem. Copy it again from aistudio.google.com/apikey. New keys start with AQ., " +
+        "older ones with AIza." };
   }
   if (/expired/i.test(m) && /key/i.test(m)) {
     return { fatal: true, why: "the key has expired", fix: "Make a new one at aistudio.google.com/apikey." };
@@ -4367,24 +4389,51 @@ function cleanKey(k) {
   return String(k || "").replace(/[\s ​-‍⁠﻿"'`‘’“”]/g, "");
 }
 
-/** Shape problems worth saying before the network is involved at all. */
+/*
+ * Shape problems worth saying before the network is involved at all. Two
+ * formats are real: the AQ. keys AI Studio has issued since May 2026, and the
+ * older AIza ones, which are exactly 39 characters. The AQ. length is not
+ * pinned here because only secondary sources state it — a wrong number would
+ * call a good key bad, which is the mistake this check exists to prevent.
+ */
 function keyShapeWarning(k) {
   if (!k) return "No key yet.";
   if (/^ya29\./.test(k)) return "That looks like an OAuth access token, not an API key.";
   if (/^\{/.test(k) || /private_key/.test(k)) return "That looks like a service-account file, not an API key.";
-  if (!/^AIza/.test(k)) return "Gemini keys start with “AIza” — this one does not, so it is probably not the right thing.";
-  if (k.length !== 39) return "Gemini keys are 39 characters; this one is " + k.length + ", so part of it may be missing.";
-  return "";
+  if (/^AIza/.test(k)) {
+    return k.length === 39 ? "" : "Older Gemini keys (AIza…) are 39 characters; this one is " +
+      k.length + ", so part of it may be missing.";
+  }
+  if (/^AQ\./.test(k)) {
+    return k.length >= 40 ? "" : "New-style keys (AQ.…) are long — this one is only " +
+      k.length + " characters, so part of it may be missing.";
+  }
+  return "Gemini keys start with “AQ.” (new) or “AIza” (older) — this one starts with neither.";
 }
 
-function geminiOnce(model, key, prompt, timeoutMs) {
+/*
+ * How the key travels. Google's documentation sends it in an x-goog-api-key
+ * header, and the AQ.-style keys AI Studio has issued since May 2026 are
+ * reported to be refused when sent the old way, as ?key= in the address. Older
+ * AIza keys take the header too, so the header is the default; the address
+ * form is kept only as a second try for a key that refuses the header.
+ */
+function geminiAuth(url, mode, key, headers) {
+  headers = headers || {};
+  if (mode === "query") return { url: url + (url.indexOf("?") >= 0 ? "&" : "?") + "key=" +
+    encodeURIComponent(key), headers: headers };
+  headers["x-goog-api-key"] = key;
+  return { url: url, headers: headers };
+}
+
+function geminiOnce(model, key, prompt, timeoutMs, mode) {
   var ctl = typeof AbortController !== "undefined" ? new AbortController() : null;
   var timer = null;
-  var url = GEMINI_BASE + "models/" + encodeURIComponent(model) +
-    ":generateContent?key=" + encodeURIComponent(key);
-  var req = fetch(url, {
+  var au = geminiAuth(GEMINI_BASE + "models/" + encodeURIComponent(model) + ":generateContent",
+    mode, key, { "content-type": "application/json" });
+  var req = fetch(au.url, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: au.headers,
     // Send the full page address as the referrer. By default a browser tells
     // another site only the origin, so a key restricted to ".../grocer/*" never
     // matches and every request is refused as coming from the wrong website.
@@ -4402,7 +4451,10 @@ function geminiOnce(model, key, prompt, timeoutMs) {
         var msg = g.msg || "HTTP " + res.status;
         var c = geminiClassify(res.status, msg, g.reason);
         throw { model: model, status: res.status, msg: msg, reason: g.reason, why: c.why,
-                fix: c.fix, fatal: !!c.fatal, transient: !!c.transient };
+                fix: c.fix, fatal: !!c.fatal, transient: !!c.transient,
+                authish: res.status === 401 || g.reason === "API_KEY_INVALID" ||
+                  g.reason === "ACCESS_TOKEN_TYPE_UNSUPPORTED" ||
+                  /api key not valid|invalid authentication credentials|expected oauth/i.test(msg) };
       }
       var data;
       try { data = JSON.parse(txt); }
@@ -4452,7 +4504,10 @@ function geminiFetch(prompt, cb, onStatus) {
   var key = cleanKey(nut.key);
   if (!key) { cb("No API key — paste one in Plan → Foods."); return; }
   var models = geminiModels();
-  var timeoutMs = Number(nut.timeoutMs) > 0 ? Number(nut.timeoutMs) : 25000;
+  // Gemini 3.x models think before answering, which can take a while.
+  var timeoutMs = Number(nut.timeoutMs) > 0 ? Number(nut.timeoutMs) : 45000;
+  var mode = nut.authMode === "query" ? "query" : "header";
+  var switched = false;
   var tried = [];
   var round = 0;
   var discovered = false;
@@ -4499,11 +4554,23 @@ function geminiFetch(prompt, cb, onStatus) {
     }
     var model = models[i];
     if (onStatus) onStatus("Asking " + model + "…");
-    geminiOnce(model, key, prompt, timeoutMs).then(function (obj) {
-      if (nut.lastModel !== model) { nut.lastModel = model; save(); }
-      cb(null, obj, { model: model, tried: tried });
+    geminiOnce(model, key, prompt, timeoutMs, mode).then(function (obj) {
+      var dirty = false;
+      if (nut.lastModel !== model) { nut.lastModel = model; dirty = true; }
+      if ((nut.authMode || "header") !== mode) { nut.authMode = mode; dirty = true; }
+      if (dirty) save();
+      cb(null, obj, { model: model, tried: tried, auth: mode });
     }, function (f) {
       f = f || {};
+      // A key refused as "not valid" may only be refusing the WAY it was sent.
+      // Try the other form once, on the same model, before calling it bad.
+      if (f.authish && !switched) {
+        switched = true;
+        mode = mode === "header" ? "query" : "header";
+        if (onStatus) onStatus("Trying the key another way…");
+        pass(i, allTransient);
+        return;
+      }
       tried.push({ model: model, why: f.why || "failed" });
       if (f.fatal) {
         cb("Google refused the key: " + f.why + ". " + (f.fix || "") +
@@ -4527,23 +4594,39 @@ function geminiFetch(prompt, cb, onStatus) {
  * experiments last because they are the ones that vanish.
  */
 function geminiDiscover(cb) {
-  var key = cleanKey(nutOf().key);
+  var nut = nutOf();
+  var key = cleanKey(nut.key);
   if (!key) { cb("Paste a key first."); return; }
-  fetch(GEMINI_BASE + "models?pageSize=200&key=" + encodeURIComponent(key),
-        { referrerPolicy: "no-referrer-when-downgrade" })
-    .then(function (res) {
-      return res.text().then(function (txt) {
-        var j = null;
-        try { j = JSON.parse(txt); } catch (e) {}
-        if (!res.ok) {
-          var g = geminiReason(j);
-          var c = geminiClassify(res.status, g.msg, g.reason);
-          throw new Error(c.why + (c.fix ? ". " + c.fix : "") +
-            (g.msg ? " (Google said: “" + g.msg + "”)" : ""));
-        }
-        return j || {};
-      });
-    }, function () { throw new Error("could not reach Google — check the connection"); })
+  var first = nut.authMode === "query" ? "query" : "header";
+
+  function list(mode) {
+    var au = geminiAuth(GEMINI_BASE + "models?pageSize=200", mode, key, {});
+    return fetch(au.url, { headers: au.headers, referrerPolicy: "no-referrer-when-downgrade" })
+      .then(function (res) {
+        return res.text().then(function (txt) {
+          var j = null;
+          try { j = JSON.parse(txt); } catch (e) {}
+          if (!res.ok) {
+            var g = geminiReason(j);
+            var c = geminiClassify(res.status, g.msg, g.reason);
+            var err = new Error(c.why + (c.fix ? ". " + c.fix : "") +
+              (g.msg ? " (Google said: “" + g.msg + "”)" : ""));
+            err.authish = res.status === 401 || g.reason === "API_KEY_INVALID" ||
+              g.reason === "ACCESS_TOKEN_TYPE_UNSUPPORTED" ||
+              /api key not valid|invalid authentication credentials|expected oauth/i.test(g.msg);
+            throw err;
+          }
+          if ((nut.authMode || "header") !== mode) { nut.authMode = mode; save(); }
+          return j || {};
+        });
+      }, function () { throw new Error("could not reach Google — check the connection"); });
+  }
+
+  list(first)
+    .catch(function (e) {
+      if (!e || !e.authish) throw e;
+      return list(first === "header" ? "query" : "header");
+    })
     .then(function (j) {
       var names = (j.models || []).filter(function (m) {
         return (m.supportedGenerationMethods || []).indexOf("generateContent") >= 0;
