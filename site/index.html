@@ -328,6 +328,46 @@ svg.chart{width:100%;height:148px;display:block;margin-top:4px}
 .seg{display:flex;background:var(--rule2);border-radius:9px;padding:3px;margin-bottom:10px}
 .seg button{flex:1;padding:6px;border-radius:7px;font-size:12.5px;color:var(--mute)}
 .seg button.on{background:var(--card);color:var(--ink);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+.sumc{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+.sumc .big2{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:26px;font-weight:650;letter-spacing:-.03em}
+.sumc .big2 small{font-size:13px;color:var(--mute);font-weight:500;letter-spacing:0}
+.sumc .lft{font-size:12.5px;color:var(--mute);text-align:right}
+.sumc .lft b{color:var(--ink);font-family:var(--mono)}
+.b3{height:10px;background:var(--rule2);border-radius:5px;overflow:hidden;display:flex;margin:8px 0 4px}
+.b3.sm{height:6px;margin:4px 0 0}
+.b3 i{display:block;height:100%}
+.b3 i.e{background:var(--deal)}
+.b3 i.s{background:var(--ahead);opacity:.45}
+.b3 i.o{background:var(--gone)}
+.lgd{font-size:11px;color:var(--mute);display:flex;gap:12px}
+.lgd i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:4px;vertical-align:0}
+.mac3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:12px}
+.mac3 .l{font-size:11px;color:var(--mute)}
+.mac3 .v{font-family:var(--mono);font-size:13px;font-weight:600}
+.mac3 .v small{color:var(--faint);font-weight:400}
+.ml{display:flex;justify-content:space-between;align-items:center;margin:16px 2px 6px}
+.ml b{font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--mute)}
+.ml span{font-family:var(--mono);font-size:12px;color:var(--mute)}
+.fi{display:flex;align-items:center;gap:10px;min-height:52px;padding:6px 0;border-bottom:1px solid var(--rule2)}
+.fi:last-child{border-bottom:0}
+.ck{width:30px;height:30px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;
+  border:2px dashed var(--ahead);color:transparent;font-size:15px;font-weight:700}
+.ck.on{border:2px solid var(--deal);background:var(--deal);color:#fff}
+.fi-m{flex:1;min-width:0}
+.fi-n{font-size:14.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fi.s .fi-n{color:var(--ahead)}
+.fi-s{font-size:11.5px;color:var(--mute)}
+.fi-k{font-family:var(--mono);font-size:13px;font-variant-numeric:tabular-nums;color:var(--mute)}
+.fi.e .fi-k{color:var(--ink)}
+.addr{display:flex;align-items:center;gap:10px;min-height:44px;color:var(--mute);font-size:13.5px;width:100%;text-align:left}
+.addr .ck{border:2px solid var(--rule);color:var(--mute)}
+.chipi{display:inline-block;font-size:10.5px;color:var(--mute);background:var(--rule2);border-radius:8px;padding:2px 7px;margin:6px 4px 0 0}
+.chipi.w{background:var(--needbg);color:var(--need)}
+.tabs2{display:flex;background:var(--rule2);border-radius:10px;padding:3px;margin-bottom:12px}
+.tabs2 button{flex:1;padding:8px;border-radius:8px;font-size:13.5px;color:var(--mute)}
+.tabs2 button.on{background:var(--card);color:var(--ink);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.07)}
+.wline{display:flex;gap:8px;align-items:center;font-size:12.5px;color:var(--gone);background:var(--gonebg);
+  border-radius:9px;padding:9px 11px;margin-bottom:10px;width:100%;text-align:left}
 details.more{margin-top:18px}
 details.more>summary{cursor:pointer;font-size:13px;font-weight:600;color:var(--mute);
   padding:10px 2px;list-style:none}
@@ -2109,7 +2149,8 @@ var Kurv = (function () {
     for (i = 0; i < dishes.length; i++) {
       xIdx.push([]);
       for (m = 0; m < meals; m++) {
-        var allowed = !done[m] && (!dishes[i].meals || dishes[i].meals.indexOf(m) >= 0);
+        var allowed = !done[m] && (!dishes[i].meals || dishes[i].meals.indexOf(m) >= 0) &&
+          !(opts.exclude && opts.exclude.indexOf(m + "|" + dishes[i].key) >= 0);
         xIdx[i].push(allowed ? nVars++ : -1);
       }
     }
@@ -3963,6 +4004,7 @@ function plateToday(force) {
     unitPrice: eatUnitPrice,
     stockOnly: true,
     eaten: { n: eatenNow.n, done: eatenNow.done },
+    exclude: skipsToday(),
     recipePref: Number(nut.recipePref) >= 0 ? Number(nut.recipePref) : 1.5,
     dayBudget: Number(nut.dayBudget) > 0 ? Number(nut.dayBudget) : 0,
   });
@@ -3989,7 +4031,20 @@ function foodCount() {
  * re-planned against what is left of each target every time you log. Nothing
  * here buys anything — that is the Today tab's job.
  */
-var EATVIEW = "day";
+var EATVIEW = "diary";   // diary | nutrients
+var NUTVIEW = "day";     // day | eaten
+
+/* Suggestions you have waved away today ("m|dishKey"). They come back tomorrow. */
+function skipsToday() {
+  var n = nutOf(), t = K.today();
+  if (!n.skip || n.skip.day !== t) return [];
+  return n.skip.keys || [];
+}
+function skipToday(m, key) {
+  var n = nutOf(), t = K.today();
+  if (!n.skip || n.skip.day !== t) n.skip = { day: t, keys: [] };
+  if (n.skip.keys.indexOf(m + "|" + key) < 0) n.skip.keys.push(m + "|" + key);
+}
 
 function diaryOf() { var n = nutOf(); if (!Array.isArray(n.diary)) n.diary = []; return n.diary; }
 function entriesOn(day) { return diaryOf().filter(function (e) { return e.day === day; }); }
@@ -4136,6 +4191,14 @@ function ironLift(n) {
   return lift;
 }
 
+function bar3(eaten, sugg, ref, cap, small) {
+  ref = ref > 0 ? ref : Math.max(eaten + sugg, 1);
+  var we = Math.min(100, eaten / ref * 100), ws = Math.max(0, Math.min(100 - we, sugg / ref * 100));
+  var over = cap > 0 && eaten + sugg > cap;
+  return '<div class="b3' + (small ? " sm" : "") + '"><i class="' + (over ? "o" : "e") + '" style="width:' +
+    we.toFixed(1) + '%"></i><i class="' + (over ? "o" : "s") + '" style="width:' + ws.toFixed(1) + '%"></i></div>';
+}
+
 function renderEat() {
   var body = $("#eatBody");
   var nut = nutOf();
@@ -4144,11 +4207,10 @@ function renderEat() {
   if (foodCount() === 0) {
     body.innerHTML =
       '<div class="card"><div class="hsub" style="margin:0 0 6px">Nothing to work with yet</div>' +
-      "<div class=\"hint\">This is a food diary that also suggests what to eat from your " +
-      "cupboard. It needs nutrition for the foods you have.</div>" +
+      "<div class=\"hint\">A food diary that also suggests what to eat from your cupboard. " +
+      "It needs nutrition for your foods first.</div>" +
       '<div class="row" style="margin-top:12px">' +
-      '<button class="btn" data-act="openClaude" style="flex:1">Exact nutrition from Claude</button></div>' +
-      '<div class="row"><button class="btn ghost" data-act="openFoods" style="flex:1">Foods</button></div></div>';
+      '<button class="btn" data-act="openClaude" style="flex:1">Exact nutrition from Claude</button></div></div>';
     return;
   }
 
@@ -4160,130 +4222,146 @@ function renderEat() {
   var tg = nut.targets || {};
   var ents = entriesOn(t);
 
-  (nut.recipes || []).forEach(function (rc) {
-    var mm2 = recipeMismatch(rc);
-    if (mm2) h += '<div class="warn" style="display:block">' + mismatchText(rc, mm2) + "</div>";
-  });
+  h += '<div class="tabs2"><button data-act="eatview" data-v="diary" class="' + (EATVIEW === "diary" ? "on" : "") +
+    '">Diary</button><button data-act="eatview" data-v="nutrients" class="' + (EATVIEW === "nutrients" ? "on" : "") +
+    '">Nutrients</button></div>';
 
-  // ---- calories: goal − eaten − planned = left
+  // ---- summary: one bar, two colours
   var goalK = tg.kcal ? (Number(tg.kcal.min) || Number(tg.kcal.max) || 0) : 0;
   var eK = eaten.n.kcal, pK = plan.n.kcal, left = goalK - eK - pK;
-  h += '<div class="card"><div class="hsub" style="margin:0">Calories remaining</div>' +
-    '<div class="cal"><div><b>' + Math.round(goalK) + "</b><span>Goal</span></div><i>−</i>" +
-    "<div><b>" + Math.round(eK) + "</b><span>Eaten</span></div><i>−</i>" +
-    "<div><b>" + Math.round(pK) + "</b><span>Suggested</span></div><i>=</i>" +
-    '<div class="rem' + (left < 0 ? " neg" : "") + '"><b>' + Math.round(left) + "</b><span>Left</span></div></div>";
-
-  // ---- macros
-  var macs = [["carb", "Carbs", 4], ["fat", "Fat", 9], ["protein", "Protein", 4]];
-  var kcalTot = Math.max(1, eK + pK);
-  h += '<div class="mac">';
-  macs.forEach(function (mc) {
+  h += '<div class="card"><div class="sumc"><div class="big2">' + Math.round(eK) +
+    '<small> + ' + Math.round(pK) + " kcal</small></div>" +
+    '<div class="lft">goal <b>' + Math.round(goalK) + "</b><br>" +
+    (left >= 0 ? "<b>" + Math.round(left) + "</b> left" : '<b style="color:var(--gone)">' + Math.round(-left) + "</b> over") +
+    "</div></div>" +
+    bar3(eK, pK, goalK, tg.kcal && tg.kcal.max) +
+    '<div class="lgd"><span><i style="background:var(--deal)"></i>eaten</span>' +
+    '<span><i style="background:var(--ahead);opacity:.45"></i>suggested</span></div>';
+  h += '<div class="mac3">';
+  [["protein", "Protein"], ["carb", "Carbs"], ["fat", "Fat"]].forEach(function (mc) {
     var key = mc[0], e1 = eaten.n[key] || 0, p1 = plan.n[key] || 0, tt = tg[key] || {};
     var goal = Number(tt.min) > 0 ? Number(tt.min) : (Number(tt.max) > 0 ? Number(tt.max) : 0);
-    var ref = goal || Math.max(e1 + p1, 1);
-    var we = Math.min(100, e1 / ref * 100), wp = Math.min(100 - we, p1 / ref * 100);
-    var over = goal && Number(tt.max) > 0 && e1 + p1 > Number(tt.max);
-    h += '<div><div class="l">' + mc[1] + "</div>" +
-      '<div class="v">' + Math.round(e1 + p1) + "<small> " + (goal ? "/ " + Math.round(goal) + " g" : "g") + "</small></div>" +
-      '<div class="bar2"><i class="e' + (over ? " over" : "") + '" style="width:' + we.toFixed(1) + '%"></i>' +
-      '<i class="p" style="width:' + wp.toFixed(1) + '%"></i></div>' +
-      '<div class="l">' + Math.round((e1 + p1) * mc[2] / kcalTot * 100) + "% of energy</div></div>";
+    h += '<div><div class="l">' + mc[1] + '</div><div class="v">' + Math.round(e1 + p1) +
+      "<small>" + (goal ? " / " + Math.round(goal) : "") + " g</small></div>" +
+      bar3(e1, p1, goal, Number(tt.max) || 0, true) + "</div>";
   });
-  h += "</div>" +
-    '<div class="ins">Dark is eaten, light is what is suggested for the rest of today. ' +
-    "Everything suggested comes from your cupboard.</div></div>";
+  h += "</div></div>";
 
-  if (!r.ok) {
-    h += '<div class="note" style="display:block">' + (r.why === "nodishes"
-      ? "None of the food in your cupboard has nutrition yet, so there is nothing to suggest."
-      : "Could not plan the rest of the day (" + esc(r.why) + ").") + "</div>";
+  if (EATVIEW === "nutrients") { body.innerHTML = h + nutrientsHTML(r, eaten, plan, ents); return; }
+
+  // ---- one short line per problem, tappable, instead of paragraphs
+  (nut.recipes || []).forEach(function (rc) {
+    var mm2 = recipeMismatch(rc);
+    if (mm2) h += '<button class="wline" data-act="openRecipe" data-id="' + esc(rc.id) + '">⚠ ' +
+      esc(rc.name) + ": " + Math.round(mm2.own) + " kcal vs " + Math.round(mm2.sum) +
+      " from its ingredients — one is cooked weight. Tap to check.</button>";
+  });
+  if (!r.ok && r.why !== "nodishes") h += '<div class="wline">Could not plan the rest of today (' + esc(r.why) + ").</div>";
+
+  var soon = expiringSoon(r);
+  if (soon.length) {
+    h += '<div class="hint" style="margin:0 2px 4px">Use soon: ' + soon.map(function (x) {
+      return "<b>" + esc(x.it.name) + "</b> " + (x.d <= 0 ? "today" : x.d === 1 ? "tomorrow" : "in " + x.d + " d") +
+        (x.planned ? " ✓" : "");
+    }).join(" · ") + "</div>";
   }
 
-  // ---- the diary, meal by meal
+  // ---- meals
   for (var m = 0; m < (Number(nut.meals) || 3); m++) {
     var mine = ents.filter(function (e) { return e.meal === m; });
     var sug = r.ok && r.plate[m] ? sortMeal(r.plate[m]) : [];
     var mAcc = { n: K.emptyNut(), giCarb: 0 };
     mine.forEach(function (e) { addNut(mAcc, entryNut(e)); });
     sug.forEach(function (e) { addNut(mAcc, planNut(e), e.servings); });
-    h += '<div class="card"><div class="meal-h"><b>' + esc(mealName(m)) + "</b><span class=\"num\">" +
-      Math.round(mAcc.n.kcal) + " kcal</span></div>";
+    h += '<div class="ml"><b>' + esc(mealName(m)) + "</b><span>" + Math.round(mAcc.n.kcal) + " kcal</span></div>";
+    h += '<div class="card" style="padding-top:4px;padding-bottom:4px">';
     mine.forEach(function (e) {
       var en = entryNut(e);
-      h += '<div class="dx"><div class="dx-m"><div class="dx-n">' + esc(e.name) + "</div>" +
-        '<div class="dx-s">' + esc(entryAmount(e)) + " · " + (+en.n.protein.toFixed(1)) + " g protein</div></div>" +
-        '<span class="dx-k">' + Math.round(en.n.kcal) + "</span>" +
-        '<button class="x" data-act="unlog" data-id="' + e.id + '" aria-label="Remove">×</button></div>';
+      h += '<div class="fi e"><span class="ck on">✓</span><div class="fi-m"><div class="fi-n">' + esc(e.name) +
+        '</div><div class="fi-s">' + esc(entryAmount(e)) + " · " + Math.round(en.n.protein) + " g protein</div></div>" +
+        '<span class="fi-k">' + Math.round(en.n.kcal) + "</span>" +
+        '<button class="x" data-act="unlog" data-id="' + e.id + '" aria-label="Undo">×</button></div>';
     });
-    if (sug.length) {
-      h += '<div class="sugh">' + (mine.length ? "Also suggested" : "Suggested") + "</div>";
-      sug.forEach(function (e) {
-        var d = e.dish;
-        h += '<div class="dx sug"><div class="dx-m"><div class="dx-n">' + esc(d.name) + "</div>" +
-          '<div class="dx-s">' + esc(dishAmount(e)) + " · " + (+((d.n.protein || 0) * e.servings).toFixed(1)) +
-          ' g protein · <button class="lnk" style="padding:0" data-act="notAtMeal" data-key="' + esc(d.key) +
-          '" data-m="' + m + '">not at ' + esc(mealName(m).toLowerCase()) + '</button> · <button class="lnk" ' +
-          'style="padding:0" data-act="editDish" data-key="' + esc(d.key) + '">edit</button></div></div>' +
-          '<span class="dx-k">' + Math.round((d.n.kcal || 0) * e.servings) + "</span>" +
-          '<button class="btn sm" data-act="ateOne" data-key="' + esc(d.key) + '" data-sv="' +
-          e.servings.toFixed(4) + '" data-m="' + m + '">Ate</button></div>';
-      });
-    } else if (!mine.length) {
-      h += '<div class="hint" style="padding:6px 0">Nothing suggested — the cupboard has nothing for it, or the day is covered.</div>';
-    }
-    // what a calorie counter will not tell you
-    var bits = [];
-    var gl = mAcc.giCarb / 100;
-    if (gl > 0.5) bits.push("glycaemic load " + Math.round(gl) + (Number((nut.perMeal || {}).gl) > 0 ? " / " + nut.perMeal.gl : ""));
+    sug.forEach(function (e) {
+      var d = e.dish;
+      h += '<div class="fi s"><button class="ck" data-act="ateOne" data-key="' + esc(d.key) + '" data-sv="' +
+        e.servings.toFixed(4) + '" data-m="' + m + '" aria-label="Ate it">✓</button>' +
+        '<button class="fi-m" style="text-align:left" data-act="editDish" data-key="' + esc(d.key) + '">' +
+        '<div class="fi-n">' + esc(d.name) + '</div><div class="fi-s">' + esc(dishAmount(e)) + " · " +
+        Math.round((d.n.protein || 0) * e.servings) + " g protein</div></button>" +
+        '<span class="fi-k">' + Math.round((d.n.kcal || 0) * e.servings) + "</span>" +
+        '<button class="x" data-act="skipSug" data-key="' + esc(d.key) + '" data-m="' + m +
+        '" aria-label="Not today">×</button></div>';
+    });
+    h += '<button class="addr" data-act="addFood" data-m="' + m + '"><span class="ck">+</span>' +
+      (mine.length || sug.length ? "Add something else" : "Add food") + "</button>";
+    // what a calorie counter will not tell you, as two small chips
+    var chips = "";
+    var gl = mAcc.giCarb / 100, glCap = Number((nut.perMeal || {}).gl) || 0;
+    if (gl >= 1) chips += '<span class="chipi' + (glCap && gl > glCap ? " w" : "") + '">GL ' + Math.round(gl) + "</span>";
     if (mAcc.n.iron > 0.3) {
       var lf = ironLift(mAcc.n);
-      bits.push("iron " + (+mAcc.n.iron.toFixed(1)) + " mg" + (Math.abs(lf - 1) > 0.05
-        ? " → ≈" + (+(mAcc.n.iron * lf).toFixed(1)) + " absorbed-equivalent (" + (lf > 1 ? "vitamin C helps" : "calcium blocks") + ")"
-        : ", no vitamin C with it"));
+      chips += '<span class="chipi">iron ' + fmtNum(mAcc.n.iron) + " mg" +
+        (lf > 1.05 ? " · ×" + lf.toFixed(1) + " with vit C" : lf < 0.95 ? " · calcium blocks" : "") + "</span>";
     }
-    if (bits.length) h += '<div class="ins">' + esc(bits.join(" · ")) + "</div>";
-    h += '<div class="row" style="margin-top:8px"><button class="btn ghost sm" data-act="addFood" data-m="' + m +
-      '" style="flex:1">+ Add food</button>' +
-      (sug.length > 1 ? '<button class="btn ghost sm" data-act="ateMeal" data-m="' + m + '" style="flex:1">Ate all suggested</button>' : "") +
-      "</div>";
-    if (sug.length > 1 && sug.some(function (e) { return e.dish.kind === "item"; })) {
-      h += '<div style="text-align:center"><button class="lnk" data-act="saveMeal" data-m="' + m +
-        '">Save this combination as a recipe</button></div>';
-    }
+    if (chips) h += '<div style="padding-bottom:6px">' + chips + "</div>";
     h += "</div>";
   }
+  if (r.ok && r.plate.some(function (p) { return p.length > 1; })) {
+    h += '<div class="hint" style="margin:10px 2px 0">Tap ○ when you have eaten it, × to drop a ' +
+      "suggestion for today, or the name to change the food.</div>";
+  }
 
-  // ---- use it before it goes
-  var soon = [];
+  body.innerHTML = h;
+}
+
+function expiringSoon(r) {
+  var t = K.today(), out = [], seen = {};
+  var planned = {};
+  if (r && r.ok) (r.useStock || []).forEach(function (u) { planned[u.item.id] = 1; });
   S.items.forEach(function (it) {
     (it.lots || []).forEach(function (L) {
       var ex = K.effExp(L, it.openLife || 0);
-      if (ex !== null && ex - t <= 3 && L.qty > 1e-6) soon.push({ it: it, lot: L, d: ex - t });
+      if (ex === null || ex - t > 3 || L.qty <= 1e-6 || seen[it.id]) return;
+      seen[it.id] = 1;
+      out.push({ it: it, d: ex - t, planned: !!planned[it.id] });
     });
   });
-  if (soon.length) {
-    var planned = {};
-    if (r.ok) (r.useStock || []).forEach(function (u) { planned[u.item.id] = u.qty; });
-    soon.sort(function (a, b) { return a.d - b.d; });
-    h += "<h2>Use it before it goes</h2><div class=\"card\">";
-    soon.forEach(function (x) {
-      var hasNut = !!(nut.foods[x.it.id] && nut.foods[x.it.id].n);
-      h += '<div class="kv"><span>' + esc(x.it.name) + " · " + K.fmtQty(x.lot.qty, x.it.unit) + " " +
-        K.UNIT_LABEL[x.it.unit] + " · " + (x.d <= 0 ? "today" : x.d === 1 ? "tomorrow" : x.d + " days") +
-        "</span><b>" + (planned[x.it.id] ? "in today's suggestions" : hasNut ? "not used today" : "no nutrition set") +
-        "</b></div>";
-    });
-    h += "</div>";
-  }
+  return out.sort(function (a, b) { return a.d - b.d; });
+}
 
-  // ---- nutrients, the full table
-  var showN = EATVIEW === "eaten" ? eaten : addNut(addNut({ n: K.emptyNut(), giCarb: 0 }, eaten), plan);
-  h += "<h2>Nutrients</h2><div class=\"card\">" +
-    '<div class="seg"><button data-act="eatview" data-v="day" class="' + (EATVIEW === "day" ? "on" : "") +
-    '">Whole day as suggested</button><button data-act="eatview" data-v="eaten" class="' +
-    (EATVIEW === "eaten" ? "on" : "") + '">Eaten so far</button></div>';
+function nutrientsHTML(r, eaten, plan, ents) {
+  var nut = nutOf(), tg = nut.targets || {}, h = "";
+  var showN = NUTVIEW === "eaten" ? eaten : addNut(addNut({ n: K.emptyNut(), giCarb: 0 }, eaten), plan);
+  var meals = Number(nut.meals) || 3, ironEff = 0, mealGL = [];
+  for (var m = 0; m < meals; m++) {
+    var acc = { n: K.emptyNut(), giCarb: 0 };
+    ents.filter(function (e) { return e.meal === m; }).forEach(function (e) { addNut(acc, entryNut(e)); });
+    if (NUTVIEW !== "eaten" && r.ok && r.plate[m]) r.plate[m].forEach(function (e) { addNut(acc, planNut(e), e.servings); });
+    ironEff += acc.n.iron * ironLift(acc.n);
+    if (acc.giCarb > 0) mealGL.push(mealName(m) + " " + Math.round(acc.giCarb / 100));
+  }
+  h += '<div class="seg"><button data-act="nutview" data-v="day" class="' + (NUTVIEW === "day" ? "on" : "") +
+    '">Whole day</button><button data-act="nutview" data-v="eaten" class="' + (NUTVIEW === "eaten" ? "on" : "") +
+    '">Eaten so far</button></div>';
+
+  // the things a calorie app does not do, first
+  h += '<div class="card"><div class="kv"><span>Glycaemic load</span><b class="num">' + Math.round(showN.giCarb / 100) +
+    "</b></div>" + (mealGL.length ? '<div class="fi-s" style="margin:-4px 0 6px">' + esc(mealGL.join(" · ")) +
+    " — under 80 a day is low, over 120 high</div>" : "") +
+    '<div class="kv"><span>Iron, adjusted for pairing</span><b class="num">' + fmtNum(ironEff) + " mg</b></div>" +
+    '<div class="fi-s" style="margin:-4px 0 6px">' + fmtNum(showN.n.iron) + " mg on paper; vitamin C in the same " +
+    "meal raises it, calcium lowers it. Aim near 16 mg if most iron is from plants and eggs.</div>";
+  if (r.ok && r.missed.length && NUTVIEW === "day") {
+    h += '<div class="kv"><span>Cupboard cannot cover</span><b style="color:var(--need);text-align:right">' +
+      esc(r.missed.slice(0, 5).map(function (x) { return nutMeta(x.key).label.toLowerCase(); }).join(", ")) +
+      "</b></div>";
+  }
+  h += '<div class="row" style="margin-top:8px"><button class="btn ghost sm" data-act="copyDay" style="flex:1">' +
+    "Ask Claude about today</button></div></div>";
+
   var groups = [["macro", "Macros"], ["mineral", "Minerals"], ["vitamin", "Vitamins"]];
+  h += '<div class="card">';
   groups.forEach(function (g) {
     h += '<div class="nb-h">' + g[1] + '</div><div class="nt"><span class="h"></span><span class="h n">Total</span>' +
       '<span class="h n">Goal</span><span class="h n">Left</span>';
@@ -4296,49 +4374,16 @@ function renderEat() {
       var leftV = mn ? mn - tot : mx ? mx - tot : null, cls = "";
       if (mn) cls = tot >= mn * 0.999 ? "ok2" : "lo2";
       if (mx && tot > mx) cls = "ov2";
-      var label = meta.label;
-      if (key === "iron" && tot > 0) {
-        var ironEff = 0;
-        if (EATVIEW === "eaten") {
-          for (var m2 = 0; m2 < (Number(nut.meals) || 3); m2++) {
-            var acc2 = { n: K.emptyNut(), giCarb: 0 };
-            ents.filter(function (e) { return e.meal === m2; }).forEach(function (e) { addNut(acc2, entryNut(e)); });
-            ironEff += acc2.n.iron * ironLift(acc2.n);
-          }
-        } else {
-          for (var m3 = 0; m3 < (Number(nut.meals) || 3); m3++) {
-            var acc3 = { n: K.emptyNut(), giCarb: 0 };
-            ents.filter(function (e) { return e.meal === m3; }).forEach(function (e) { addNut(acc3, entryNut(e)); });
-            if (r.ok && r.plate[m3]) r.plate[m3].forEach(function (e) { addNut(acc3, planNut(e), e.servings); });
-            ironEff += acc3.n.iron * ironLift(acc3.n);
-          }
-        }
-        label += ' <span class="dx-s">≈' + fmtNum(ironEff) + " with pairing</span>";
-      }
-      h += "<span>" + label + ' <span class="dx-s">' + esc(meta.unit) + "</span></span>" +
+      h += "<span>" + esc(meta.label) + ' <span class="fi-s">' + esc(meta.unit) + "</span></span>" +
         '<span class="n">' + fmtNum(tot) + '</span><span class="n">' + goalTxt + "</span>" +
         '<span class="n ' + cls + '">' + (leftV === null ? "" : (mn && leftV <= 0 ? "✓" : fmtNum(leftV))) + "</span>";
     });
     h += "</div>";
   });
-  var dayGL = showN.giCarb / 100;
-  h += '<div class="ins">Glycaemic load for the ' + (EATVIEW === "eaten" ? "day so far" : "whole day") + ": <b>" +
-    Math.round(dayGL) + "</b> (under 80 is low, over 120 high). Iron “with pairing” weighs each meal's " +
-    "iron by the vitamin C and calcium eaten with it — compare it with a target of about 16 mg if " +
-    "most of your iron is from plants and eggs.</div>";
-  if (r.ok && r.missed.length && EATVIEW === "day") {
-    h += '<div class="ins" style="color:var(--need)">Your cupboard cannot cover: ' +
-      esc(r.missed.slice(0, 6).map(function (x) {
-        var mt = nutMeta(x.key); return mt.label.toLowerCase() + " " + fmtNum(x.amount) + " " + mt.unit;
-      }).join(", ")) + ". Restocking is on the Today tab.</div>";
-  }
-  h += '<div class="row" style="margin-top:12px">' +
-    '<button class="btn ghost" data-act="copyDay" style="flex:1">Ask Claude about today</button></div>' +
-    '<div class="row"><button class="btn ghost sm" data-act="openTargets" style="flex:1">Goals</button>' +
+  h += '<div class="row" style="margin-top:12px"><button class="btn ghost sm" data-act="openTargets" style="flex:1">Goals</button>' +
     '<button class="btn ghost sm" data-act="openFoods" style="flex:1">Foods</button>' +
     '<button class="btn ghost sm" data-act="openRecipes" style="flex:1">Recipes</button></div></div>';
-
-  body.innerHTML = h;
+  return h;
 }
 
 function fmtNum(v) {
@@ -6990,6 +7035,13 @@ document.addEventListener("click", function (e) {
   if (act === "logsave") { logSave(); return; }
   if (act === "logother") { logOther(); return; }
   if (act === "eatview") { EATVIEW = b.dataset.v; render(); return; }
+  if (act === "nutview") { NUTVIEW = b.dataset.v; render(); return; }
+  if (act === "skipSug") {
+    skipToday(Number(b.dataset.m), b.dataset.key);
+    save(); nutTouched(); render();
+    toast("Dropped for today. Edit the food to stop it for good.");
+    return;
+  }
   if (act === "copyDay") {
     var dt = dayText();
     if (navigator.clipboard && navigator.clipboard.writeText) {

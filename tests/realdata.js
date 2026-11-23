@@ -67,12 +67,18 @@ setTimeout(() => {
   console.log("\nEAT TAB");
   $('nav button[data-tab="eat"]').click();
   const eat = $("#eatBody").textContent.replace(/\s+/g, " ");
-  check("diary header: goal − eaten − suggested = left", /Calories remaining/.test(eat) && /Suggested/.test(eat));
-  check("says what the cupboard cannot cover", /Your cupboard cannot cover/.test(eat),
-    (eat.match(/Your cupboard cannot cover[^.]*\./) || [""])[0].slice(0, 140));
-  check("flags the pasta cooked/dry mismatch", /Pasta dish says 410 kcal/.test(eat) && /cooked/.test(eat), 
-    (eat.match(/Pasta dish says[^.]*\./) || [""])[0]);
-  check("names the culprit and its per-100 g figure", /Pasta \(131 kcal per 100 g as entered\)/.test(eat));
+  check("summary: eaten + suggested against goal, two colours", /goal/.test(eat) && /suggested/.test(eat) && !!$("#eatBody .b3 i.s"));
+  check("flags the pasta cooked/dry mismatch in one line", /Pasta dish: 410 kcal vs 183/.test(eat),
+    (eat.match(/Pasta dish: [^.]*\./) || [""])[0]);
+  doc.querySelector('#eatBody .wline[data-act="openRecipe"]').click();
+  const rtxt = $("#recipeBody").textContent.replace(/\s+/g, " ");
+  check("tapping it opens the recipe, which names the culprit", /Pasta \(131 kcal per 100 g as entered\)/.test(rtxt));
+  $('[data-act="closeRecipe"]').click();
+  $('[data-act="eatview"][data-v="nutrients"]').click();
+  const nt = $("#eatBody").textContent.replace(/\s+/g, " ");
+  check("Nutrients view says what the cupboard cannot cover", /Cupboard cannot cover/.test(nt));
+  check("Nutrients view shows iron adjusted for pairing and GL", /Iron, adjusted for pairing/.test(nt) && /Glycaemic load/.test(nt));
+  $('[data-act="eatview"][data-v="diary"]').click();
   check("overnight oats NOT flagged (they agree)", !/Overnight Oats says/.test(eat));
 
   console.log("\nTARGETS");

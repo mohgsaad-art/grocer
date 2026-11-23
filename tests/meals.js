@@ -83,17 +83,25 @@ setTimeout(() => {
   check("halves allowed -> multiples of 0.5", r.plate.flat().filter((e) => e.dish.name === "Eggs").every((e) => Math.abs(e.servings * 2 - Math.round(e.servings * 2)) < 1e-6));
   nut.foods.egg.step = 1;
 
-  console.log("\nEAT TAB: NOT AT THIS MEAL");
+  console.log("\nEAT TAB: DROP A SUGGESTION, TICK ONE OFF");
   nut.recipes[0].meals = [];
   plate();
   $('nav button[data-tab="eat"]').click();
-  const btn = [...doc.querySelectorAll('[data-act="notAtMeal"]')].find((b) => b.dataset.key === "r:r1");
-  check("each dish has a 'Not at <meal>' link", !!btn, btn && btn.textContent);
-  if (btn) {
-    const m = Number(btn.dataset.m);
-    btn.click();
-    check("that meal removed from the dish", nut.recipes[0].meals.length === 3 && nut.recipes[0].meals.indexOf(m) < 0, JSON.stringify(nut.recipes[0].meals));
-  }
+  const x = doc.querySelector('#eatBody [data-act="skipSug"]');
+  check("every suggestion has an x", !!x);
+  const key = x.dataset.key, m = Number(x.dataset.m);
+  x.click();
+  const r2 = app.plateToday();
+  check("dropped suggestion is gone from that meal today", !r2.plate[m].some((e) => e.dish.key === key));
+  check("…and the meal is re-planned, not just emptied", r2.ok);
+  const stock0 = app.S().items.reduce((a, i) => a + K.stockOf(i), 0);
+  const ck = doc.querySelector('#eatBody .ck[data-act="ateOne"]');
+  ck.click();
+  check("ticking the circle logs it", (nut.diary || []).length === 1);
+  check("…and takes it off the cupboard", app.S().items.reduce((a, i) => a + K.stockOf(i), 0) < stock0);
+  doc.querySelector('#eatBody [data-act="unlog"]').click();
+  check("x on an eaten row puts it back", (nut.diary || []).length === 0 &&
+    Math.abs(app.S().items.reduce((a, i) => a + K.stockOf(i), 0) - stock0) < 1e-9);
 
   console.log("\nFOOD EDITOR: MEALS AND PORTIONS");
   $('nav button[data-tab="plan"]').click();
