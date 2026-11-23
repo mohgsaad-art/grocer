@@ -287,6 +287,15 @@ svg.chart{width:100%;height:148px;display:block;margin-top:4px}
 .tgt-f .tg.sm{width:100%;justify-content:center;padding:7px 4px;font-size:11px}
 .tgt-na{display:block;text-align:center;color:var(--faint);font-size:12px;padding:7px 0}
 .tg.sm{padding:3px 8px;font-size:10.5px;min-height:0}
+.st{display:inline-block;font-size:10.5px;padding:1px 7px;border-radius:9px;margin:3px 4px 0 0;
+  background:var(--rule);color:var(--mute)}
+.st.no{background:var(--needbg);color:var(--need)}
+details.more{margin-top:18px}
+details.more>summary{cursor:pointer;font-size:13px;font-weight:600;color:var(--mute);
+  padding:10px 2px;list-style:none}
+details.more>summary::-webkit-details-marker{display:none}
+details.more>summary::before{content:"\25B8  "}
+details.more[open]>summary::before{content:"\25BE  "}
 .tg[disabled]{opacity:.4}
 .tg-mini{font-size:9.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
   color:var(--faint);border:1px solid var(--rule);border-radius:4px;padding:1px 4px}
@@ -633,6 +642,35 @@ nav .pip{position:absolute;top:7px;right:calc(50% - 19px);min-width:15px;height:
       <button class="btn ghost" data-act="close">Cancel</button>
       <button class="btn ghost" data-act="planCSVCopy">Copy</button>
       <button class="btn" data-act="applyPlanCSV">Read it in</button>
+    </div>
+  </div>
+</div>
+
+<!-- Nutrition by Claude -------------------------------------------------- -->
+<div class="modal" id="mClaude">
+  <div class="sheet tall">
+    <h3>Exact nutrition from Claude</h3>
+    <div class="sub">Send your foods out, paste the answer back in.</div>
+    <div class="hint" style="margin-bottom:10px">
+      <b>1.</b> Tap <b>Copy request</b> and paste it into a chat with Claude. It lists every
+      food with the exact products on its lookout list, your recipes and your meals.<br>
+      <b>2.</b> Claude looks up the real label values and sends back a block of text that
+      starts with <span class="num">{"kurv": "nutrition"</span>.<br>
+      <b>3.</b> Copy that whole reply, paste it below, and tap <b>Read it in</b>. You see
+      what changes before anything is saved.
+    </div>
+    <div class="row" style="margin-bottom:8px">
+      <button class="btn ghost" data-act="claudeCopy" style="flex:1">Copy request</button>
+      <button class="btn ghost" data-act="claudeFile" style="flex:1">Save as file</button>
+    </div>
+    <div class="f">
+      <textarea id="claudeArea" rows="8" spellcheck="false" autocapitalize="off"
+        autocorrect="off" placeholder="Paste Claude's reply here"></textarea>
+    </div>
+    <div class="prev" id="claudePrev"></div>
+    <div class="row">
+      <button class="btn ghost" data-act="close">Close</button>
+      <button class="btn" data-act="claudeApply" id="claudeApplyBtn">Read it in</button>
     </div>
   </div>
 </div>
@@ -1722,6 +1760,15 @@ var Kurv = (function () {
     return isFinite(n) && n > 0 ? n : 0;
   }
 
+  // How finely a dish may be portioned, in servings: 1 = whole servings only
+  // (the default — "0.46 of a pasta dish" is not something anyone cooks),
+  // 0.5 = halves, 0 = any amount (oil, milk in coffee).
+  function stepOf(v) {
+    if (v === undefined || v === null || v === "") return 1;
+    var n = Number(v);
+    return isFinite(n) && n >= 0 ? n : 1;
+  }
+
   function buildDishes(items, nut) {
     var byId = {}, i, j;
     for (i = 0; i < items.length; i++) byId[items[i].id] = items[i];
@@ -1773,6 +1820,7 @@ var Kurv = (function () {
         uses: uses, n: info.n, carb: info.carb, giCarb: info.giCarb,
         complete: info.complete, serveLabel: fmtQty(serve, it.unit) + " " + UNIT_LABEL[it.unit],
         meals: (foods[it.id].meals && foods[it.id].meals.length) ? foods[it.id].meals : null,
+        step: stepOf(foods[it.id].step),
         capDay: capOf(foods[it.id].capDay, 3),
         capMeal: capOf(foods[it.id].capMeal, 0),
       });
@@ -1824,6 +1872,7 @@ var Kurv = (function () {
         ownNut: !!(r.ownNut && r.n),
         complete: rinfo.complete && !missing, serveLabel: "1 serving",
         meals: (r.meals && r.meals.length) ? r.meals : null,
+        step: stepOf(r.step),
         capDay: capOf(r.capDay, 2),
         capMeal: capOf(r.capMeal, 0),
       });
@@ -2123,8 +2172,61 @@ var Kurv = (function () {
       cons.push(rI);
     }
 
-    var sol = solveLP(nVars, obj, cons, { maxIter: opts.maxIter || 30000 });
+    var lpOpts = { maxIter: opts.maxIter || 30000 };
+    var sol = solveLP(nVars, obj, cons, lpOpts);
     if (!sol.ok) return { ok: false, why: sol.status, dishes: dishes, meals: meals };
+
+    /*
+     * Whole servings. The program above is continuous, so its answer is happy
+     * to say "0.46 of a pasta dish at breakfast" — the cheapest way to top up
+     * a nutrient is a sliver of whatever carries it. Nobody cooks that.
+     *
+     * Exact integer programming is overkill for a plate, so this dives: solve,
+     * pin every serving count that already came out whole, round the most
+     * fractional one to its nearest step, and solve again around it. Rounding
+     * down can never break a hard limit (every one is a ceiling), so there is
+     * always a way forward; rounding up is tried first when it is nearer, and
+     * kept only if the rest of the day still fits. A dozen solves at most on a
+     * normal plan, each a few milliseconds.
+     */
+    if (opts.wholeServings !== false) {
+      var stepV = {}, pinned = {};
+      for (i = 0; i < dishes.length; i++) {
+        if (!(dishes[i].step > 0)) continue;
+        for (m = 0; m < meals; m++) if (xIdx[i][m] >= 0) stepV[xIdx[i][m]] = dishes[i].step;
+      }
+      var pinRows = [];
+      function pinRow(v, val) { var r = row("=", val); r.a[v] = 1; return r; }
+      for (var guard = 0; guard < 200; guard++) {
+        var worst = -1, worstF = 0;
+        for (var vs in stepV) {
+          if (pinned[vs] !== undefined) continue;
+          var y = sol.x[vs] / stepV[vs];
+          var fr = Math.abs(y - Math.round(y));
+          if (fr < 1e-6) { pinned[vs] = Math.round(y) * stepV[vs]; pinRows.push(pinRow(Number(vs), pinned[vs])); continue; }
+          if (fr > worstF) { worstF = fr; worst = Number(vs); }
+        }
+        if (worst < 0) break;
+        var yw = sol.x[worst] / stepV[worst];
+        var near = Math.round(yw), far = near > yw ? Math.floor(yw) : Math.ceil(yw);
+        var tries = [near, far, Math.floor(yw)];
+        var got = null;
+        for (var tt = 0; tt < tries.length && !got; tt++) {
+          var val = Math.max(0, tries[tt]) * stepV[worst];
+          var s2 = solveLP(nVars, obj, cons.concat(pinRows, [pinRow(worst, val)]), lpOpts);
+          if (s2.ok) got = { sol: s2, val: val };
+        }
+        if (!got) { pinned[worst] = sol.x[worst]; pinRows.push(pinRow(worst, sol.x[worst])); continue; }
+        pinned[worst] = got.val;
+        pinRows.push(pinRow(worst, got.val));
+        sol = got.sol;
+      }
+      // Clear the last few parts per million of pivoting noise.
+      for (var vz in stepV) {
+        var q = Math.round(sol.x[vz] / stepV[vz]) * stepV[vz];
+        if (Math.abs(q - sol.x[vz]) < 1e-5) sol.x[vz] = q;
+      }
+    }
 
     // --- read the answer back out
     var plate = [], cost = 0, fromStock = 0;
@@ -2240,7 +2342,7 @@ var Kurv = (function () {
     stockOf: stockOf, reconcile: reconcile, coverOf: coverOf, openLot: openLot,
     consume: consume, budgetUnitOf: budgetUnitOf,
     NUTRIENTS: NUTRIENTS, NUT_KEYS: NUT_KEYS, NUT_DEFAULTS: NUT_DEFAULTS,
-    MEAL_DEFAULTS: MEAL_DEFAULTS,
+    MEAL_DEFAULTS: MEAL_DEFAULTS, stepOf: stepOf,
     emptyNut: emptyNut, defaultServing: defaultServing,
     buildDishes: buildDishes, planDay: planDay, solveLP: solveLP,
     spoilUrgency: spoilUrgency,
@@ -3655,17 +3757,21 @@ function renderEat() {
     h += '<div class="card">';
     row.forEach(function (e) {
       var d = e.dish;
+      var svTxt = (+e.servings.toFixed(2)) + (e.servings === 1 ? " serving" : " servings");
       var amount = d.kind === "item"
         ? K.fmtQty(d.uses[d.id] * e.servings, byId(d.id) ? byId(d.id).unit : "pc") + " " +
-          (byId(d.id) ? K.UNIT_LABEL[byId(d.id).unit] : "")
-        : (+e.servings.toFixed(2)) + (e.servings === 1 ? " serving" : " servings");
+          (byId(d.id) ? K.UNIT_LABEL[byId(d.id).unit] : "") + " (" + svTxt + ")"
+        : svTxt;
       h += '<div class="lo">' +
         '<div class="lo-m"><div class="lo-n">' + esc(d.name) +
         (d.kind === "recipe" ? ' <span class="tg-mini">recipe</span>' : "") + "</div>" +
         '<div class="lo-s">' + esc(amount) + " · " +
         Math.round((d.n.kcal || 0) * e.servings) + " kcal · " +
         (+((d.n.protein || 0) * e.servings).toFixed(1)) + " g protein" +
-        (d.ownNut ? " · own profile" : "") + "</div></div>" +
+        (d.ownNut ? " · own profile" : "") + "</div>" +
+        '<div><button class="lnk" data-act="notAtMeal" data-key="' + esc(d.key) + '" data-m="' + m +
+        '">Not at ' + esc(mealName(m).toLowerCase()) + '</button> <button class="lnk" ' +
+        'data-act="editDish" data-key="' + esc(d.key) + '">Edit</button></div></div>' +
         '<button class="btn sm" data-act="ateOne" data-key="' + esc(d.key) +
         '" data-sv="' + e.servings.toFixed(4) + '">Ate it</button>' +
         '<button class="x" data-act="notAMeal" data-key="' + esc(d.key) +
@@ -4138,6 +4244,249 @@ function openFoods() {
   openSheet("#mFoods");
 }
 
+/* Which meals a dish may go in, and how finely it may be portioned. Shared by
+   the food and the recipe editor, because to the planner both are a dish. */
+function dishOptsHTML(o, kind) {
+  var n = Number(nutOf().meals) || 3, sel = o.meals || [];
+  var h = '<div class="f"><label>Eaten at</label><div class="tags" style="margin-top:0">';
+  h += '<button class="tg' + (sel.length ? "" : " on") + '" data-act="dishmeal" data-kind="' +
+    kind + '" data-m="-1">Any meal</button>';
+  for (var m = 0; m < n; m++) {
+    h += '<button class="tg' + (sel.indexOf(m) >= 0 ? " on" : "") + '" data-act="dishmeal" ' +
+      'data-kind="' + kind + '" data-m="' + m + '">' + esc(mealName(m)) + "</button>";
+  }
+  h += '</div><div class="hint">Tap every meal it suits. The plan will not put it anywhere ' +
+    "else — so no pasta at breakfast.</div></div>";
+  var st = K.stepOf(o.step);
+  h += '<div class="f"><label>Portions</label><div class="row">' +
+    [[1, "Whole servings"], [0.5, "Halves too"], [0, "Any amount"]].map(function (x) {
+      return '<button class="tg' + (st === x[0] ? " on" : "") + '" data-act="dishstep" data-kind="' +
+        kind + '" data-v="' + x[0] + '" style="flex:1">' + x[1] + "</button>";
+    }).join("") +
+    '</div><div class="hint">Whole servings means the plan says 1 or 2, never 0.46. ' +
+    '"Any amount" suits things like milk in coffee.</div></div>';
+  return h;
+}
+
+function dishObj(kind) {
+  return kind === "recipe" ? curRecipe() : nutOf().foods[FOOD.id];
+}
+function redrawDish(kind) {
+  if (kind === "recipe") { var r = curRecipe(); if (r) $("#recipeBody").innerHTML = recipeFormHTML(r); }
+  else if (FOOD.id) $("#foodBody").innerHTML = foodFormHTML(byId(FOOD.id), nutOf().foods[FOOD.id]);
+}
+function dishByKey(key) {
+  if (!key) return null;
+  if (key.indexOf("i:") === 0) return nutOf().foods[key.slice(2)] || null;
+  var rid = key.slice(2);
+  return (nutOf().recipes || []).filter(function (x) { return x.id === rid; })[0] || null;
+}
+
+/* ---------------------------------------------------- nutrition by Claude
+ *
+ * Gemini answers from memory with no product in front of it, so "pasta"
+ * comes back as cooked American enriched pasta. A chat with Claude can look
+ * the actual Danish product up. This is the round trip: a self-explaining
+ * request out, a strict JSON reply in, shown as a diff before it is saved.
+ */
+function claudeRequest() {
+  var nut = nutOf();
+  var units = { kg: "kg", L: "litres", pc: "pieces" };
+  var foods = S.items.map(function (it) {
+    var f = nut.foods[it.id] || null;
+    var products = (it.watch || []).map(function (w) {
+      return w.name + (w.store ? " (" + storeLabel(w.store) + ")" : "");
+    });
+    var o = { id: it.id, name: it.name, unit: it.unit, perMonth: it.perMonth, products: products };
+    if (f && f.product) o.product = f.product;
+    if (f) o.current = { per: f.per, serving: f.serving, gi: f.gi, soloOk: f.soloOk !== false,
+      meals: (f.meals || []).map(mealName), n: f.n };
+    return o;
+  });
+  var recipes = (nut.recipes || []).map(function (r) {
+    return { name: r.name, serves: r.serves || 1, meals: (r.meals || []).map(mealName),
+      parts: (r.parts || []).map(function (p) {
+        var it = byId(p.itemId);
+        return { id: p.itemId, food: it ? it.name : "?", qty: p.qty, unit: it ? it.unit : "" };
+      }) };
+  });
+  return {
+    kurv: "nutrition-request", version: 1,
+    task: "Fill in nutrition for these foods for the Kurv grocery app. I live in Denmark. " +
+      "Look up each product listed (brand, store) and use its label or the Danish food " +
+      "database (frida.fooddata.dk) — not US values, and nothing fortified unless that exact " +
+      "product is. Values are for the food AS BOUGHT: dry pasta, raw rice, uncooked oats, the " +
+      "drink as poured. Carbohydrate excludes fibre. Also suggest which of my meals each food " +
+      "suits, whether it is eaten on its own or only inside recipes, and good recipes or " +
+      "pairings from these foods (e.g. vitamin C with plant iron). Reply with ONE JSON object " +
+      "exactly in the replyFormat shape, nothing I have to edit.",
+    units: "'per' and 'serving' and recipe 'qty' are in the food's unit: kg, L or pc. " +
+      "0.1 kg = 100 g. Nutrient units: " + K.NUTRIENTS.map(function (n) { return n[0] + "=" + n[2]; }).join(", "),
+    meals: Array.apply(null, Array(Number(nut.meals) || 3)).map(function (_, i) { return mealName(i); }),
+    foods: foods,
+    recipes: recipes,
+    replyFormat: {
+      kurv: "nutrition", version: 1,
+      foods: [{ id: "same id as above", name: "...", source: "product + where the figures came from",
+        per: 0.1, serving: 0.1, gi: 50, soloOk: true, meals: ["Lunch", "Dinner"], step: 1,
+        n: { kcal: 0, protein: 0, "...": "every nutrient key above that you know" } }],
+      recipes: [{ name: "...", serves: 1, meals: ["Breakfast"], step: 1, capDay: 1,
+        parts: [{ id: "food id", qty: 0.1 }], note: "why this pairing",
+        ownNut: false }],
+    },
+  };
+}
+
+function openClaude() {
+  $("#claudeArea").value = "";
+  $("#claudePrev").innerHTML = "";
+  openSheet("#mClaude");
+}
+
+function claudeText() {
+  return "Please fill in exact nutrition for my Kurv foods.\n\n" +
+    JSON.stringify(claudeRequest(), null, 1);
+}
+
+/* Pull the JSON out of whatever was pasted: a chat reply often wraps it in a
+   code fence or a sentence either side. */
+function parseClaudeReply(text) {
+  var a = text.indexOf("{"), b = text.lastIndexOf("}");
+  if (a < 0 || b <= a) return { err: "No JSON found. Paste the whole reply." };
+  var d;
+  try { d = JSON.parse(text.slice(a, b + 1)); } catch (e) { return { err: "That is not complete JSON: " + e.message }; }
+  if (!d || (d.kurv !== "nutrition" && !d.foods && !d.recipes)) return { err: "That is not a Kurv nutrition reply." };
+  if (d.kurv === "nutrition-request") return { err: "That is the request. Paste Claude's answer instead." };
+  return planClaudeChanges(d);
+}
+
+function mealIdx(names) {
+  if (!Array.isArray(names)) return null;
+  var n = Number(nutOf().meals) || 3, out = [];
+  names.forEach(function (nm) {
+    for (var m = 0; m < n; m++) {
+      if (String(nm).trim().toLowerCase() === mealName(m).toLowerCase() && out.indexOf(m) < 0) out.push(m);
+    }
+  });
+  out.sort();
+  return out;
+}
+
+function findItem(id, name) {
+  if (id && byId(id)) return byId(id);
+  if (!name) return null;
+  var k = String(name).trim().toLowerCase();
+  return S.items.filter(function (i) { return i.name.toLowerCase() === k; })[0] || null;
+}
+
+function planClaudeChanges(d) {
+  var ch = { foods: [], recipes: [], skipped: [] };
+  (d.foods || []).forEach(function (x) {
+    var it = findItem(x.id, x.name);
+    if (!it) { ch.skipped.push(x.name || x.id || "?"); return; }
+    var f = { n: {} };
+    ["per", "serving", "gi", "step", "capDay"].forEach(function (k) {
+      var v = Number(x[k]);
+      if (x[k] !== undefined && isFinite(v) && v >= 0) f[k] = v;
+    });
+    if (typeof x.soloOk === "boolean") f.soloOk = x.soloOk;
+    var mi = mealIdx(x.meals);
+    if (mi) f.meals = mi;
+    if (x.source) f.source = String(x.source);
+    if (x.product) f.product = String(x.product);
+    var nn = x.n || {};
+    K.NUT_KEYS.forEach(function (k) {
+      var v = Number(nn[k]);
+      if (nn[k] !== undefined && nn[k] !== null && isFinite(v) && v >= 0) f.n[k] = v;
+    });
+    ch.foods.push({ item: it, f: f });
+  });
+  (d.recipes || []).forEach(function (x) {
+    if (!x || !x.name) return;
+    var parts = [], miss = [];
+    (x.parts || []).forEach(function (p) {
+      var it = findItem(p.id, p.food || p.name);
+      var q = Number(p.qty);
+      if (it && q > 0) parts.push({ itemId: it.id, qty: q });
+      else miss.push(p.food || p.name || p.id || "?");
+    });
+    if (!parts.length) { ch.skipped.push(x.name + " (no ingredients matched)"); return; }
+    var ex = (nutOf().recipes || []).filter(function (r) {
+      return (r.name || "").trim().toLowerCase() === String(x.name).trim().toLowerCase();
+    })[0];
+    ch.recipes.push({ x: x, parts: parts, miss: miss, existing: ex || null, meals: mealIdx(x.meals) });
+  });
+  return { ch: ch };
+}
+
+function previewClaude() {
+  var box = $("#claudePrev");
+  var txt = $("#claudeArea").value;
+  if (!txt.trim()) { box.innerHTML = ""; return null; }
+  var r = parseClaudeReply(txt);
+  if (r.err) { box.innerHTML = '<div class="hint" style="color:var(--need)">' + esc(r.err) + "</div>"; return null; }
+  var ch = r.ch, h = "";
+  ch.foods.forEach(function (c) {
+    var old = (nutOf().foods[c.item.id] || {}).n || {};
+    var per = c.f.per || (nutOf().foods[c.item.id] || {}).per || K.defaultServing(c.item.unit);
+    var bits = ["kcal", "protein", "iron"].filter(function (k) { return c.f.n[k] !== undefined; }).map(function (k) {
+      var o = Number(old[k]) || 0;
+      return k + " " + (o ? (+o.toFixed(1)) + " \u2192 " : "") + (+c.f.n[k].toFixed(1));
+    });
+    h += '<div class="kv"><span>' + esc(c.item.name) + "</span><b class=\"num\">" +
+      esc(bits.join(" · ")) + " per " + K.fmtQty(per, c.item.unit) + " " + K.UNIT_LABEL[c.item.unit] +
+      (c.f.meals ? " · " + c.f.meals.map(mealName).join("/") : "") + "</b></div>";
+  });
+  ch.recipes.forEach(function (c) {
+    h += '<div class="kv"><span>' + esc(c.x.name) + (c.existing ? " · updates" : " · new recipe") +
+      "</span><b class=\"num\">" + c.parts.length + " ingredients" +
+      (c.meals && c.meals.length ? " · " + c.meals.map(mealName).join("/") : "") + "</b></div>";
+  });
+  if (ch.skipped.length) h += '<div class="hint" style="color:var(--need)">Not matched, skipped: ' + esc(ch.skipped.join(", ")) + "</div>";
+  if (!ch.foods.length && !ch.recipes.length) h = '<div class="hint">Nothing in it matches your foods.</div>' + h;
+  box.innerHTML = h;
+  return ch;
+}
+
+function applyClaude() {
+  var ch = previewClaude();
+  if (!ch || (!ch.foods.length && !ch.recipes.length)) { toast("Nothing to read in."); return; }
+  var nut = nutOf();
+  ch.foods.forEach(function (c) {
+    var f = nut.foods[c.item.id];
+    if (!f) f = nut.foods[c.item.id] = { per: c.item.unit === "pc" ? 1 : 0.1,
+      serving: K.defaultServing(c.item.unit), gi: 0, soloOk: true, capDay: 3, n: K.emptyNut() };
+    if (!f.n) f.n = K.emptyNut();
+    // A new "per" rescales the meaning of every figure, so when the reply sets
+    // one, its nutrient block replaces the old one outright rather than mixing.
+    if (c.f.per !== undefined && c.f.per !== f.per) f.n = K.emptyNut();
+    for (var k in c.f) if (k !== "n") f[k] = c.f[k];
+    for (var nk in c.f.n) f.n[nk] = c.f.n[nk];
+  });
+  ch.recipes.forEach(function (c) {
+    var r = c.existing;
+    if (!r) { r = { id: uid(), name: String(c.x.name), capDay: 2, ownNut: false }; nut.recipes.push(r); }
+    r.parts = c.parts;
+    if (Number(c.x.serves) > 0) r.serves = Number(c.x.serves);
+    if (c.meals) r.meals = c.meals;
+    if (c.x.step !== undefined) r.step = K.stepOf(c.x.step);
+    if (Number(c.x.capDay) >= 0 && c.x.capDay !== undefined) r.capDay = Number(c.x.capDay);
+    if (c.x.note) r.note = String(c.x.note);
+    if (c.x.ownNut && c.x.n) {
+      r.ownNut = true; r.n = K.emptyNut();
+      for (var k2 in c.x.n) if (isFinite(Number(c.x.n[k2]))) r.n[k2] = Number(c.x.n[k2]);
+      if (Number(c.x.gi) >= 0) r.gi = Number(c.x.gi);
+    } else if (c.x.ownNut === false) {
+      // Sum of the parts — which are the figures just read in.
+      r.ownNut = false;
+    }
+  });
+  save(); nutTouched(); plateToday(true);
+  closeSheets(); render();
+  toast(ch.foods.length + (ch.foods.length === 1 ? " food" : " foods") + " and " +
+    ch.recipes.length + (ch.recipes.length === 1 ? " recipe" : " recipes") + " updated.");
+}
+
 var FOOD = { id: null };
 
 function openFood(id) {
@@ -4191,6 +4540,17 @@ function foodFormHTML(it, f) {
       '<div class="hint">0 means no limit. This is the brake on “nine eggs a day” — ' +
       "without it the cheapest answer to a protein target is one food, repeated.</div></div>" +
     "</div>";
+
+  h += '<div class="f"><label>Exact product</label>' +
+    '<input type="text" value="' + esc(f.product || "") + '" data-act="foodtext" data-f="product" ' +
+    'placeholder="' + esc(((it.watch || [])[0] || {}).name || "e.g. Oatly Havredrik Mild 1 L") + '">' +
+    '<div class="hint">Brand and product as on the pack. Goes out with the request to Claude, ' +
+    "along with what is on the lookout list.</div></div>";
+  if (f.source) {
+    h += '<div class="hint" style="margin:-4px 0 10px">Values from: ' + esc(f.source) + "</div>";
+  }
+
+  h += dishOptsHTML(f, "food");
 
   h += '<div class="f"><label>Is this a meal on its own?</label>' +
     '<div class="row">' +
@@ -4324,6 +4684,9 @@ function recipeFormHTML(r) {
       (r.capDay === undefined ? 2 : r.capDay) + '" data-act="rset" data-f="capDay">' +
       '<div class="hint">0 means no limit.</div></div>' +
     "</div>";
+
+  h += dishOptsHTML(r, "recipe");
+  if (r.note) h += '<div class="hint" style="margin:-4px 0 10px">' + esc(r.note) + "</div>";
 
   h += '<div class="nb-h">Ingredients</div>';
   (r.parts || []).forEach(function (p, i) {
@@ -4963,17 +5326,36 @@ function renderPlan() {
   if (!S.items.length) {
     h += starterHTML();
   } else {
+    // One row per food with everything it still needs, so nothing has to be
+    // added twice in two places: the item (amount, price) and the food
+    // (nutrition, meals) are two buttons on the same row.
+    h += '<div class="hint" style="margin:0 0 8px">Each food is added once. <b>Edit</b> is how ' +
+      "much you use and what you will pay; <b>Food</b> is nutrition and which meals it is for. " +
+      "Orange tags are what is still missing.</div>";
     h += '<div class="card">';
+    var fdz = nutOf().foods || {};
     S.items.forEach(function (it) {
-      var r = K.rateOf(it);
+      var r = K.rateOf(it), f = fdz[it.id];
+      var hasNut = f && f.n && (Number(f.n.kcal) > 0 || Number(f.n.protein) > 0);
+      var tags = [];
+      tags.push((it.watch || []).length ? '<span class="st">watching ' + it.watch.length + "</span>" :
+        '<span class="st no">no products watched</span>');
+      tags.push(hasNut ? '<span class="st">nutrition' + (f.source ? " ✓" : "") + "</span>" :
+        '<span class="st no">no nutrition</span>');
+      if (f && f.soloOk === false) tags.push('<span class="st">in recipes only</span>');
+      else if (hasNut) tags.push('<span class="st">' + ((f.meals || []).length ?
+        esc(f.meals.map(mealName).join(", ")) : "any meal") + "</span>");
       h += '<div class="lot"><div class="lot-m">' +
         '<div class="lot-q">' + esc(it.name) + "</div>" +
         '<div class="lot-s"><span class="num">' + K.fmtQty(it.perMonth, it.unit) + "</span> " +
         K.UNIT_LABEL[it.unit] + " a month · <span class=\"num\">" +
         (r > 0 ? K.fmtQty(r, it.unit) : "0") + "</span> a day · keeps " +
         it.shelfLife + " d" + (it.openLife > 0 ? ", " + it.openLife + " d once open" : "") +
-        "</div>" + '<div class="lot-s">' + budgetLine(it) + "</div></div>" +
+        "</div>" + '<div class="lot-s">' + budgetLine(it) + "</div>" +
+        "<div>" + tags.join("") + "</div></div>" +
+        '<div style="display:flex;flex-direction:column;gap:5px">' +
         '<button class="btn ghost sm" data-act="editItem" data-id="' + it.id + '">Edit</button>' +
+        '<button class="btn ghost sm" data-act="openFood" data-id="' + it.id + '">Food</button></div>' +
         "</div>";
     });
     h += "</div>";
@@ -4981,6 +5363,19 @@ function renderPlan() {
     if (remainingStarters().length) h += "<h2>Quick add</h2>" + starterChips();
   }
 
+  h += "<h2>Meals and nutrition</h2><div class=\"card\">" +
+    '<div class="row"><button class="btn" data-act="openClaude" style="flex:1">' +
+    "Exact nutrition from Claude</button></div>" +
+    '<div class="hint" style="margin:6px 0 10px">Sends your foods with the exact products on ' +
+    "their lookout lists to a chat with Claude, which looks up the real label values and " +
+    "suggests meals and recipes. Paste the reply back in.</div>" +
+    '<div class="row"><button class="btn ghost" data-act="openRecipes" style="flex:1">Recipes' +
+    ((nutOf().recipes || []).length ? " (" + nutOf().recipes.length + ")" : "") + "</button>" +
+    '<button class="btn ghost" data-act="openTargets" style="flex:1">Daily targets</button></div>' +
+    '<div class="row"><button class="btn ghost" data-act="openPerMeal" style="flex:1">' +
+    "Meals and limits</button></div></div>";
+
+  h += '<details class="more"><summary>Settings — buying rules, prices, Gemini, backup</summary>';
   h += "<h2>Rules</h2><div class=\"card\">";
   h += '<div class="f"><label>Buy again when supply drops to</label>' +
     '<input type="number" min="1" step="1" inputmode="numeric" value="' + S.settings.coverDays +
@@ -5014,19 +5409,11 @@ function renderPlan() {
   h += '<div class="row"><button class="btn ghost" data-act="refresh" style="flex:1">' +
     "Check for new prices</button></div></div>";
 
-  h += "<h2>Nutrition</h2><div class=\"card\">" +
-    '<div class="row"><button class="btn ghost" data-act="openTargets" style="flex:1">' +
-    "Daily targets</button>" +
-    '<button class="btn ghost" data-act="openPerMeal" style="flex:1">Meals and limits</button></div>' +
+  h += "<h2>All foods' nutrition</h2><div class=\"card\">" +
     '<div class="row"><button class="btn ghost" data-act="openFoods" style="flex:1">' +
-    "Foods" + (foodCount() ? " (" + foodCount() + ")" : "") + "</button>" +
-    '<button class="btn ghost" data-act="openRecipes" style="flex:1">Recipes' +
-    ((nutOf().recipes || []).length ? " (" + nutOf().recipes.length + ")" : "") +
-    "</button></div>" +
-    '<div class="hint" style="margin-top:8px">The Eat tab plans a day against these. Every ' +
-    "figure is yours to set. Floors and ceilings are judged on the <b>day's total</b>, so an " +
-    "unbalanced single meal is never held against you — only protein, glycaemic load and " +
-    "energy-share are judged per meal.</div></div>";
+    "Foods list" + (foodCount() ? " (" + foodCount() + ")" : "") + "</button></div>" +
+    '<div class="hint" style="margin-top:8px">The same as each row\'s <b>Food</b> button, as ' +
+    "one list. Gemini's key and models live in there.</div></div>";
 
   h += "<h2>Your data</h2><div class=\"card\">" +
     '<div class="hint" style="margin:0 0 10px">Everything lives on this device only. ' +
@@ -5038,6 +5425,7 @@ function renderPlan() {
     "Plan as CSV</button></div>" +
     '<div class="hint" style="margin-top:8px">Paste the whole monthly plan in as a CSV ' +
     "instead of filling in a sheet per item, or copy it out to keep elsewhere.</div></div>";
+  h += "</details>";
 
   body.innerHTML = h;
 }
@@ -5923,11 +6311,71 @@ document.addEventListener("click", function (e) {
   if (act === "openTargets") { openTargets(); return; }
   if (act === "openPerMeal") { openPerMeal(); return; }
   if (act === "openFoods") { openFoods(); return; }
-  if (act === "openFood") { openFood(id); return; }
-  if (act === "closeFood") { closeSheets(); openFoods(); return; }
+  if (act === "openFood") { FOOD.back = !!b.closest("#mFoods"); openFood(id); return; }
+  if (act === "closeFood") { closeSheets(); if (FOOD.back) openFoods(); else render(); return; }
+  if (act === "openClaude") { openClaude(); return; }
+  if (act === "claudeCopy") {
+    var ctext = claudeText();
+    var done = function () { toast("Copied. Paste it into a chat with Claude."); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(ctext).then(done, function () {
+        $("#claudeArea").value = ctext; $("#claudeArea").select();
+        toast("Select all and copy the text in the box.");
+      });
+    } else { $("#claudeArea").value = ctext; $("#claudeArea").select(); toast("Select all and copy the text in the box."); }
+    return;
+  }
+  if (act === "claudeFile") {
+    var cb = new Blob([claudeText()], { type: "text/plain" });
+    var ca = document.createElement("a");
+    ca.href = URL.createObjectURL(cb);
+    ca.download = "kurv-foods-" + K.isoFromDay(K.today()) + ".txt";
+    ca.click();
+    setTimeout(function () { URL.revokeObjectURL(ca.href); }, 4000);
+    return;
+  }
+  if (act === "claudeApply") { applyClaude(); return; }
+  if (act === "dishmeal") {
+    var dmo = dishObj(b.dataset.kind), dm = Number(b.dataset.m);
+    if (dmo) {
+      if (dm < 0) dmo.meals = [];
+      else {
+        var cur = (dmo.meals || []).slice(), at = cur.indexOf(dm);
+        if (at >= 0) cur.splice(at, 1); else cur.push(dm);
+        cur.sort();
+        dmo.meals = cur;
+      }
+      save(); nutTouched(); redrawDish(b.dataset.kind);
+    }
+    return;
+  }
+  if (act === "dishstep") {
+    var dso = dishObj(b.dataset.kind);
+    if (dso) { dso.step = Number(b.dataset.v); save(); nutTouched(); redrawDish(b.dataset.kind); }
+    return;
+  }
+  if (act === "notAtMeal") {
+    var nmo = dishByKey(b.dataset.key), nm0 = Number(b.dataset.m);
+    if (nmo) {
+      var nMeals = Number(nutOf().meals) || 3, ok = [];
+      var base = (nmo.meals && nmo.meals.length) ? nmo.meals : Array.apply(null, Array(nMeals)).map(function (_, i) { return i; });
+      base.forEach(function (x) { if (x !== nm0 && x < nMeals) ok.push(x); });
+      if (!ok.length) { toast("That is the only meal it is set for. Edit it to choose another."); return; }
+      nmo.meals = ok;
+      save(); nutTouched(); plateToday(true); render();
+      toast("Now only at " + ok.map(mealName).join(", ").toLowerCase() + ".");
+    }
+    return;
+  }
+  if (act === "editDish") {
+    var ek = b.dataset.key || "";
+    if (ek.indexOf("i:") === 0) { FOOD.back = false; openFood(ek.slice(2)); }
+    else openRecipe(ek.slice(2));
+    return;
+  }
   if (act === "openRecipes") { openRecipes(); return; }
-  if (act === "openRecipe") { openRecipe(b.dataset.id); return; }
-  if (act === "closeRecipe") { closeSheets(); openRecipes(); return; }
+  if (act === "openRecipe") { RCP.back = !!b.closest("#mRecipes"); openRecipe(b.dataset.id); return; }
+  if (act === "closeRecipe") { closeSheets(); if (RCP.back) openRecipes(); else render(); return; }
   if (act === "resetTargets") {
     nutOf().targets = JSON.parse(JSON.stringify(K.NUT_DEFAULTS));
     save(); nutTouched();
@@ -6094,6 +6542,12 @@ document.addEventListener("input", function (e) {
     save(); nutTouched();
     return;
   }
+  if (t.dataset && t.dataset.act === "foodtext") {
+    var fx = nutOf().foods[FOOD.id];
+    if (fx) { fx[t.dataset.f] = t.value; save(); }
+    return;
+  }
+  if (t.id === "claudeArea") { previewClaude(); return; }
   if (t.dataset && t.dataset.act === "foodset") {
     var fo = nutOf().foods[FOOD.id];
     if (fo) {
@@ -6263,7 +6717,8 @@ window.Kurv_app = { S: function () { return S; }, CAT: CAT, render: render,
   nutTouched: nutTouched, plateToday: plateToday,
   geminiFetch: geminiFetch, geminiModels: geminiModels, geminiDiscover: geminiDiscover,
   cleanKey: cleanKey, keyShapeWarning: keyShapeWarning, flushSave: flushSave,
-  nutPrompt: nutPrompt, recipeMismatch: recipeMismatch };
+  nutPrompt: nutPrompt, recipeMismatch: recipeMismatch,
+  claudeRequest: claudeRequest, parseClaudeReply: parseClaudeReply };
 })();
 </script>
 </body>
