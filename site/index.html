@@ -1769,6 +1769,79 @@ var Kurv = (function () {
     return isFinite(n) && n >= 0 ? n : 1;
   }
 
+  /*
+   * Roles: how a food takes part in a meal, so meals can be assembled rather
+   * than typed in as recipes. "Pasta with tuna", "pasta with chicken", "just
+   * pasta and a protein milk" are all the same three decisions — which base,
+   * which protein, what goes on top — and the planner can make them itself.
+   *
+   *   base     the starch a meal is built on: pasta, rice, oats, bread.
+   *            At most one per meal. Recipes count as a base.
+   *   protein  the main protein: tuna, chicken, eggs. At most one per meal.
+   *   topping  only eaten on something: cheese, sauce, pesto. Never alone,
+   *            and only as much as what it goes on.
+   *   side     anything that can join any meal: fruit, veg, yoghurt.
+   *   drink    likewise, kept apart only so the plate reads naturally.
+   *   recipe   only ever an ingredient in a recipe: oil, spices.
+   *
+   * A food with no role set gets a guess from its name; anything not
+   * recognised is a side, which is how every food behaved before roles.
+   */
+  var ROLES = ["base", "protein", "topping", "side", "drink", "recipe"];
+  // Order matters: "tun i olie" is tuna before it is oil, "pasta sauce" is a
+  // topping before it is pasta.
+  var ROLE_GUESS = [
+    ["protein", /tun\b|tuna|kylling|chicken|æg\b|eggs?\b|okse|beef|hakket|svin|pork|laks|salmon|fisk|fish|torsk|rejer|shrimp|kalkun|turkey|tofu|tempeh|linser|lentil|kikært|chickpea|bønner|beans|skyr|cottage|hytteost|lam\b|lamb|makrel|mackerel|sardin/i],
+    ["topping", /\bost\b|cheese|parmesan|mozzarella|feta|sauce|sovs|pesto|ketchup|mayo|dressing|smør|butter|olie|\boil\b|tomatpuré|passata|flødeost|cream cheese|hummus/i],
+    ["drink", /mælk|milk|drik|drink|juice|kaffe|coffee|\bte\b|\btea\b|shake|kakao|kefir/i],
+    ["base", /pasta|spaghetti|penne|rigatoni|fusilli|makaroni|nudl|noodle|ris\b|rice|basmati|jasmin|couscous|bulgur|quinoa|havregryn|oats?\b|grød|porridge|müsli|muesli|granola|brød|bread|rugbrød|toast|tortilla|wrap|pita|kartof|potato|bagel|boller/i],
+  ];
+  function guessRole(name) {
+    var n = String(name || "");
+    for (var i = 0; i < ROLE_GUESS.length; i++) if (ROLE_GUESS[i][1].test(n)) return ROLE_GUESS[i][0];
+    return null;
+  }
+  /*
+   * Which meals a food suits, when it has not been told. Without this every
+   * untagged food may go anywhere, and the cheapest breakfast turns out to be
+   * pasta. Meal types are read off the meal names you chose, so "Frokost"
+   * works as well as "Lunch". An explicit choice (even "any meal") wins.
+   */
+  var MEAL_TYPE = [["b", /break|morgen|brunch/i], ["l", /lunch|frokost/i],
+                   ["d", /dinner|aften|supper|middag/i], ["s", /snack|mellem|evening|kvæld/i]];
+  var MEAL_GUESS = [
+    [/havregryn|oats?\b|grød|porridge|müsli|muesli|granola|cornflakes|skyr|yoghurt|youghurt|cereal/i, "b s"],
+    [/brød|bread|toast|bagel|boller|rugbrød/i, "b l s"],
+    [/pasta|spaghetti|penne|rigatoni|fusilli|makaroni|ris\b|rice|basmati|jasmin|kartof|potato|couscous|bulgur|quinoa|nudl|noodle|tortilla|wrap|pita|lasagne|curry|chili|gryde|stew/i, "l d"],
+    [/æg\b|eggs?\b|omelet/i, "b l s"],
+    [/tun\b|tuna|kylling|chicken|okse|beef|hakket|svin|pork|laks|salmon|fisk|fish|torsk|rejer|shrimp|kalkun|turkey|tofu|tempeh|linser|lentil|kikært|chickpea|bønner|beans|lam\b|lamb|makrel|mackerel/i, "l d"],
+  ];
+  function guessMeals(name, mealNames, count) {
+    var n = String(name || ""), want = null;
+    for (var i = 0; i < MEAL_GUESS.length && !want; i++) if (MEAL_GUESS[i][0].test(n)) want = MEAL_GUESS[i][1];
+    if (!want) return null;
+    var out = [];
+    for (var m = 0; m < count; m++) {
+      var nm = (mealNames || [])[m] || "", t = null;
+      for (var k = 0; k < MEAL_TYPE.length && !t; k++) if (MEAL_TYPE[k][1].test(nm)) t = MEAL_TYPE[k][0];
+      // A meal whose name says nothing (\"Meal 2\") takes anything.
+      if (!t || want.indexOf(t) >= 0) out.push(m);
+    }
+    return out.length && out.length < count ? out : null;
+  }
+  function mealsOf(o, name, nut) {
+    if (Array.isArray(o.meals)) return o.meals.length ? o.meals : null;
+    var count = Math.max(1, Math.min(6, Number(nut.meals) || 3));
+    return guessMeals(name, nut.mealNames, count);
+  }
+
+  function roleOf(food, item) {
+    if (food && ROLES.indexOf(food.role) >= 0) return food.role;
+    var g = guessRole(item && item.name);
+    if (g) return g;
+    return food && food.soloOk === false ? "topping" : "side";
+  }
+
   function buildDishes(items, nut) {
     var byId = {}, i, j;
     for (i = 0; i < items.length; i++) byId[items[i].id] = items[i];
@@ -1809,7 +1882,8 @@ var Kurv = (function () {
       // the arithmetic knows it is inedible by the bowl. Marking a food
       // recipe-only removes it as a standalone dish, so the only way to eat it
       // is in something you actually cook.
-      if (foods[it.id].soloOk === false) continue;
+      var role = roleOf(foods[it.id], it);
+      if (role === "recipe") continue;
       var serve = Number(foods[it.id].serving) > 0
         ? Number(foods[it.id].serving) : defaultServing(it.unit);
       var uses = {};
@@ -1819,8 +1893,15 @@ var Kurv = (function () {
         key: "i:" + it.id, kind: "item", id: it.id, name: it.name,
         uses: uses, n: info.n, carb: info.carb, giCarb: info.giCarb,
         complete: info.complete, serveLabel: fmtQty(serve, it.unit) + " " + UNIT_LABEL[it.unit],
-        meals: (foods[it.id].meals && foods[it.id].meals.length) ? foods[it.id].meals : null,
+        meals: mealsOf(foods[it.id], it.name, nut),
         step: stepOf(foods[it.id].step),
+        role: role,
+        // Base and protein are fine alone unless told otherwise; a topping
+        // never is.
+        alone: role === "topping" ? false : foods[it.id].alone !== false,
+        goesWith: Array.isArray(foods[it.id].goesWith) && foods[it.id].goesWith.length
+          ? foods[it.id].goesWith : null,
+        ratio: Number(foods[it.id].ratio) > 0 ? Number(foods[it.id].ratio) : 1,
         capDay: capOf(foods[it.id].capDay, 3),
         capMeal: capOf(foods[it.id].capMeal, 0),
       });
@@ -1871,8 +1952,10 @@ var Kurv = (function () {
         uses: ruses, n: rinfo.n, carb: rinfo.carb, giCarb: rinfo.giCarb,
         ownNut: !!(r.ownNut && r.n),
         complete: rinfo.complete && !missing, serveLabel: "1 serving",
-        meals: (r.meals && r.meals.length) ? r.meals : null,
+        meals: mealsOf(r, r.name, nut),
         step: stepOf(r.step),
+        role: r.role === "side" || r.role === "protein" ? r.role : "base",
+        alone: true, goesWith: null, ratio: 1,
         capDay: capOf(r.capDay, 2),
         capMeal: capOf(r.capMeal, 0),
       });
@@ -1985,6 +2068,16 @@ var Kurv = (function () {
         mgiIdx.push(Number(perMeal.gi) > 0 ? nVars++ : -1);
         mkIdx.push(Number(perMeal.kcalShare) > 0 ? nVars++ : -1);
       }
+    }
+
+    // Slot variables: z[d][m] = 1 when base or protein dish d is THE base or
+    // THE protein of meal m. Binary in the end (the dive below rounds them);
+    // they are what makes "pasta and rice and couscous, a third each" not a meal.
+    var zIdx = [];
+    for (i = 0; i < dishes.length; i++) {
+      zIdx.push([]);
+      var slotted = dishes[i].role === "base" || dishes[i].role === "protein";
+      for (m = 0; m < meals; m++) zIdx[i].push(slotted && xIdx[i][m] >= 0 ? nVars++ : -1);
     }
 
     var obj = new Array(nVars).fill(0);
@@ -2165,6 +2258,51 @@ var Kurv = (function () {
       }
     }
 
+    // --- (J) building meals out of parts
+    function hostsOf(d, m, roles) {
+      var out = [];
+      for (var h = 0; h < dishes.length; h++) {
+        if (h === d || xIdx[h][m] < 0 || roles.indexOf(dishes[h].role) < 0) continue;
+        var gw = dishes[d].goesWith;
+        if (gw && dishes[h].kind === "item" && gw.indexOf(dishes[h].id) < 0) continue;
+        if (gw && dishes[h].kind === "recipe" && gw.indexOf("r:" + dishes[h].id) < 0 &&
+            gw.indexOf(dishes[h].key) < 0) continue;
+        out.push(h);
+      }
+      return out;
+    }
+    for (m = 0; m < meals; m++) {
+      var rBase = row("<=", 1), rProt = row("<=", 1), anyB = false, anyP = false;
+      for (i = 0; i < dishes.length; i++) {
+        var z = zIdx[i][m];
+        if (z < 0) continue;
+        // x <= M z: no servings of it unless it holds the slot.
+        var Mx = dishes[i].capMeal > 0 ? dishes[i].capMeal : (dishes[i].capDay > 0 ? dishes[i].capDay : 4);
+        var rZ = row("<=", 0);
+        rZ.a[xIdx[i][m]] = 1; rZ.a[z] = -Mx;
+        cons.push(rZ);
+        var rZ1 = row("<=", 1); rZ1.a[z] = 1; cons.push(rZ1);
+        if (dishes[i].role === "base") { rBase.a[z] = 1; anyB = true; }
+        else { rProt.a[z] = 1; anyP = true; }
+      }
+      if (anyB) cons.push(rBase);
+      if (anyP) cons.push(rProt);
+
+      for (i = 0; i < dishes.length; i++) {
+        if (xIdx[i][m] < 0 || dishes[i].alone) continue;
+        // Needs something to go with: a topping needs a base or a protein,
+        // a protein marked "not alone" needs a base, a base needs either.
+        var roles = dishes[i].role === "topping" ? ["base", "protein"]
+          : dishes[i].role === "protein" ? ["base"] : ["protein", "topping"];
+        var hs = hostsOf(i, m, roles);
+        var rT = row("<=", 0);
+        rT.a[xIdx[i][m]] = 1;
+        var k2 = dishes[i].role === "topping" ? dishes[i].ratio : 4;
+        for (var hh = 0; hh < hs.length; hh++) rT.a[xIdx[hs[hh]][m]] -= k2;
+        cons.push(rT);
+      }
+    }
+
     // --- (I) a ceiling on today's shopping, if one was given
     if (Number(opts.dayBudget) > 0) {
       var rI = row("<=", Number(opts.dayBudget));
@@ -2190,37 +2328,87 @@ var Kurv = (function () {
      * normal plan, each a few milliseconds.
      */
     if (opts.wholeServings !== false) {
-      var stepV = {}, pinned = {};
+      var stepV = {}, zVars = {}, xVars = {};
       for (i = 0; i < dishes.length; i++) {
+        for (m = 0; m < meals; m++) if (zIdx[i][m] >= 0) { stepV[zIdx[i][m]] = 1; zVars[zIdx[i][m]] = 1; }
         if (!(dishes[i].step > 0)) continue;
-        for (m = 0; m < meals; m++) if (xIdx[i][m] >= 0) stepV[xIdx[i][m]] = dishes[i].step;
+        for (m = 0; m < meals; m++) if (xIdx[i][m] >= 0) { stepV[xIdx[i][m]] = dishes[i].step; xVars[xIdx[i][m]] = dishes[i].step; }
       }
-      var pinRows = [];
+      var solves = 0, BUDGET = Number(opts.solveBudget) > 0 ? Number(opts.solveBudget) : 400;
       function pinRow(v, val) { var r = row("=", val); r.a[v] = 1; return r; }
-      for (var guard = 0; guard < 200; guard++) {
-        var worst = -1, worstF = 0;
-        for (var vs in stepV) {
-          if (pinned[vs] !== undefined) continue;
-          var y = sol.x[vs] / stepV[vs];
-          var fr = Math.abs(y - Math.round(y));
-          if (fr < 1e-6) { pinned[vs] = Math.round(y) * stepV[vs]; pinRows.push(pinRow(Number(vs), pinned[vs])); continue; }
-          if (fr > worstF) { worstF = fr; worst = Number(vs); }
+      function lp(rows) { solves++; return solveLP(nVars, obj, cons.concat(rows), lpOpts); }
+
+      // Round a set of variables one at a time, most fractional first, each
+      // time trying both neighbours and keeping the better day.
+      function dive(vars, rows, start) {
+        rows = rows.slice();
+        var cur = start, pinned = {};
+        for (var guard = 0; guard < 300; guard++) {
+          var worst = -1, worstF = 0;
+          for (var vs in vars) {
+            if (pinned[vs] !== undefined) continue;
+            var y = cur.x[vs] / vars[vs];
+            var fr = Math.abs(y - Math.round(y));
+            if (fr > 1e-6 && fr > worstF) { worstF = fr; worst = Number(vs); }
+          }
+          if (worst < 0) break;
+          var yw = cur.x[worst] / vars[worst];
+          var tries = [Math.floor(yw), Math.ceil(yw)], got = null;
+          for (var tt = 0; tt < tries.length; tt++) {
+            if (solves >= BUDGET && got) break;
+            var val = Math.max(0, tries[tt]) * vars[worst];
+            var s2 = lp(rows.concat([pinRow(worst, val)]));
+            if (s2.ok && (!got || s2.z < got.sol.z - 1e-9)) got = { sol: s2, val: val };
+          }
+          var pv = got ? got.val : cur.x[worst];
+          pinned[worst] = pv;
+          rows.push(pinRow(worst, pv));
+          if (got) cur = got.sol;
         }
-        if (worst < 0) break;
-        var yw = sol.x[worst] / stepV[worst];
-        var near = Math.round(yw), far = near > yw ? Math.floor(yw) : Math.ceil(yw);
-        var tries = [near, far, Math.floor(yw)];
-        var got = null;
-        for (var tt = 0; tt < tries.length && !got; tt++) {
-          var val = Math.max(0, tries[tt]) * stepV[worst];
-          var s2 = solveLP(nVars, obj, cons.concat(pinRows, [pinRow(worst, val)]), lpOpts);
-          if (s2.ok) got = { sol: s2, val: val };
-        }
-        if (!got) { pinned[worst] = sol.x[worst]; pinRows.push(pinRow(worst, sol.x[worst])); continue; }
-        pinned[worst] = got.val;
-        pinRows.push(pinRow(worst, got.val));
-        sol = got.sol;
+        return cur;
       }
+
+      /*
+       * 1. Decide each meal's shape — which base, which protein — with the
+       *    amounts still free. 2. Improve it by trying every single swap
+       *    (tuna for chicken at dinner, no base at all at snacks) and keeping
+       *    any that makes the day better; greedy rounding alone happily buys
+       *    the dearer of two identical tins. 3. Only then round the amounts.
+       */
+      var z1 = dive(zVars, [], sol);
+      var assign = {};
+      for (var zv in zVars) assign[zv] = Math.round(z1.x[zv]) > 0 ? 1 : 0;
+      function zRows(a) { return Object.keys(a).map(function (v) { return pinRow(Number(v), a[v]); }); }
+      var best = lp(zRows(assign));
+      if (!best.ok) best = z1;
+      for (var pass = 0; pass < 3 && solves < BUDGET; pass++) {
+        var improved = false;
+        for (m = 0; m < meals; m++) {
+          ["base", "protein"].forEach(function (role) {
+            var slots = [];
+            for (var d = 0; d < dishes.length; d++) {
+              if (dishes[d].role === role && zIdx[d][m] >= 0) slots.push(zIdx[d][m]);
+            }
+            if (!slots.length) return;
+            var holder = -1;
+            slots.forEach(function (v) { if (assign[v]) holder = v; });
+            var alts = slots.concat([-1]);
+            for (var a = 0; a < alts.length && solves < BUDGET; a++) {
+              if (alts[a] === holder) continue;
+              var trial = {};
+              for (var k0 in assign) trial[k0] = assign[k0];
+              slots.forEach(function (v) { trial[v] = 0; });
+              if (alts[a] >= 0) trial[alts[a]] = 1;
+              var st2 = lp(zRows(trial));
+              if (st2.ok && st2.z < best.z - 1e-6) {
+                assign = trial; best = st2; holder = alts[a]; improved = true;
+              }
+            }
+          });
+        }
+        if (!improved) break;
+      }
+      sol = dive(xVars, zRows(assign), best);
       // Clear the last few parts per million of pivoting noise.
       for (var vz in stepV) {
         var q = Math.round(sol.x[vz] / stepV[vz]) * stepV[vz];
@@ -2343,6 +2531,7 @@ var Kurv = (function () {
     consume: consume, budgetUnitOf: budgetUnitOf,
     NUTRIENTS: NUTRIENTS, NUT_KEYS: NUT_KEYS, NUT_DEFAULTS: NUT_DEFAULTS,
     MEAL_DEFAULTS: MEAL_DEFAULTS, stepOf: stepOf,
+    ROLES: ROLES, guessRole: guessRole, roleOf: roleOf, guessMeals: guessMeals, mealsOf: mealsOf,
     emptyNut: emptyNut, defaultServing: defaultServing,
     buildDishes: buildDishes, planDay: planDay, solveLP: solveLP,
     spoilUrgency: spoilUrgency,
@@ -2761,6 +2950,45 @@ var EXPANDED = {};
 var SFILT = {};   // item id -> store code the lookout search is narrowed to, "" = all
 var LOSORT = {};  // item id -> "store" to group the lookout list by shop
 
+/* Read a meal the way you would say it: base, protein, what goes on, sides. */
+function sortMeal(row) {
+  var order = { recipe: 1, base: 2, protein: 3, topping: 4, side: 5, drink: 6 };
+  return row.slice().sort(function (a, b) {
+    return (order[a.dish.kind === "recipe" ? "recipe" : a.dish.role] || 9) -
+           (order[b.dish.kind === "recipe" ? "recipe" : b.dish.role] || 9);
+  });
+}
+
+/* The one-glance answer at the top of Today: what to eat, and anything the
+   plate needs that is not in the cupboard, with where it is cheapest. */
+function todayPlateHTML() {
+  if (!foodCount()) return "";
+  var r;
+  try { r = plateToday(); } catch (e) { return ""; }
+  if (!r || !r.ok) return "";
+  var h = '<h2>Eat today</h2><div class="card">';
+  for (var m = 0; m < r.meals; m++) {
+    if (!r.plate[m].length) continue;
+    h += '<div class="kv"><span>' + esc(mealName(m)) + "</span><b>" +
+      esc(sortMeal(r.plate[m]).map(function (e) { return e.dish.name; }).join(" + ")) + "</b></div>";
+  }
+  if (r.buy.length) {
+    h += '<div class="hint" style="margin-top:8px">Needs buying for this:</div>';
+    r.buy.forEach(function (b) {
+      var o = cheapestOffer(b.item);
+      h += '<div class="kv"><span>' + esc(b.item.name) + " · " + K.fmtQty(b.qty, b.item.unit) + " " +
+        K.UNIT_LABEL[b.item.unit] + "</span><b class=\"num\">" +
+        (o ? esc(storeLabel(o.store)) + " " + K.kr(o.price) + (o.off > 0.05 ? " · " + Math.round(o.off * 100) + "% off" : "")
+           : "≈ " + K.kr0(b.cost)) + "</b></div>";
+    });
+  } else {
+    h += '<div class="hint" style="margin-top:8px">All from the cupboard.</div>';
+  }
+  h += '<div class="row" style="margin-top:8px"><button class="btn ghost sm" data-act="tab" data-tab="eat" ' +
+    'style="flex:1">Amounts and nutrition</button></div></div>';
+  return h;
+}
+
 function renderToday() {
   var body = $("#todayBody");
   if (!S.items.length) {
@@ -2777,6 +3005,8 @@ function renderToday() {
   var html = "";
 
   if (CAT.error) html += '<div class="note"><span>' + esc(CAT.error) + "</span></div>";
+
+  html += todayPlateHTML();
 
   var act = views.filter(function (v) { return v.d.state !== "ok" && v.d.state !== "off"; });
   var calm = views.filter(function (v) { return v.d.state === "ok" || v.d.state === "off"; });
@@ -3618,13 +3848,18 @@ function savingsSVG() {
 var PLATE = { day: null, res: null, stamp: 0 };
 
 /** Price per canonical unit for the optimiser: your budget price, nothing else. */
+/* What a unit costs if today's plate needs it bought: the cheapest offer on
+   its lookout list right now, so a tuna offer actually makes tuna for dinner
+   more likely. With nothing watched, the most you said you would pay. */
 function eatUnitPrice(it) {
-  var b = K.budgetUnitOf(it);
-  if (b !== null) return b;
-  // Fall back to the cheapest thing on the lookout list, so an item with
-  // nutrition but no budget price still takes part rather than vanishing.
   var offs = K.offers(it, lookup);
-  return offs.length ? offs[0].unitPrice : null;
+  if (offs.length) return offs[0].unitPrice;
+  var b = K.budgetUnitOf(it);
+  return b !== null ? b : null;
+}
+function cheapestOffer(it) {
+  var offs = K.offers(it, lookup);
+  return offs.length ? offs[0] : null;
 }
 
 function nutOf() {
@@ -3708,7 +3943,7 @@ function renderEat() {
   if ((kShort && kShort.frac > 0.15) || (pShort && pShort.frac > 0.15) || r.missed.length > nMin / 2) {
     var noNut = S.items.filter(function (i) { return !(nutS.foods || {})[i.id]; }).map(function (i) { return i.name; });
     var solo = S.items.filter(function (i) {
-      var f = (nutS.foods || {})[i.id]; return f && f.soloOk === false;
+      var f = (nutS.foods || {})[i.id]; return f && K.roleOf(f, i) === "recipe";
     }).length;
     // Without this, a green bar for iron sits next to a day that is half a day,
     // and reads as "iron is fine" when it means "this is everything you have".
@@ -3744,7 +3979,9 @@ function renderEat() {
   // ---- the plate itself
   for (var m = 0; m < r.meals; m++) {
     var row = r.plate[m];
-    h += '<h2>' + esc(mealName(m)) + "</h2>";
+    row = sortMeal(row);
+    h += '<h2>' + esc(mealName(m)) + (row.length ? " · " + esc(row.map(function (e) {
+      return e.dish.name; }).join(" + ")) : "") + "</h2>";
     if (!row.length) {
       h += '<div class="card"><div class="hint">Nothing here — the day fits in the other meals.</div></div>';
       continue;
@@ -3774,8 +4011,6 @@ function renderEat() {
         'data-act="editDish" data-key="' + esc(d.key) + '">Edit</button></div></div>' +
         '<button class="btn sm" data-act="ateOne" data-key="' + esc(d.key) +
         '" data-sv="' + e.servings.toFixed(4) + '">Ate it</button>' +
-        '<button class="x" data-act="notAMeal" data-key="' + esc(d.key) +
-        '" title="Not a meal on its own" aria-label="Not a meal on its own">⊘</button>' +
         "</div>";
     });
     h += '<div class="gsub" style="margin-top:8px"><span>' + Math.round(mk) + " kcal</span>" +
@@ -3804,12 +4039,16 @@ function renderEat() {
     h += '<div class="row" style="margin-top:10px"><button class="btn ghost" data-act="ateMeal" ' +
       'data-m="' + m + '" style="flex:1">Ate all of ' + esc(mealName(m).toLowerCase()) +
       "</button></div>";
+    if (row.length > 1 && row.some(function (e) { return e.dish.kind === "item"; })) {
+      h += '<div style="text-align:center"><button class="lnk" data-act="saveMeal" data-m="' + m +
+        '">Save this combination as a recipe</button></div>';
+    }
     h += "</div>";
   }
 
   // ---- shopping this day implies
   if (r.buy.length) {
-    h += "<h2>Would need buying</h2><div class=\"card\">";
+    h += "<h2>Buy for today</h2><div class=\"card\">";
     r.buy.forEach(function (b2) {
       h += '<div class="kv"><span>' + esc(b2.item.name) + "</span><b class=\"num\">" +
         K.fmtQty(b2.qty, b2.item.unit) + " " + K.UNIT_LABEL[b2.item.unit] +
@@ -4205,7 +4444,7 @@ function foodsHTML() {
       '<div class="lo-s">' + (done
         ? Math.round(Number(f.n.kcal) || 0) + " kcal, " +
           (+(Number(f.n.protein) || 0).toFixed(1)) + " g protein per " + perLabel(it, f) +
-          (f.soloOk === false ? " · only in recipes" : "")
+          " · " + ROLE_LABEL[K.roleOf(f, it)].toLowerCase()
         : "no nutrition yet") + "</div></div>" +
       '<button class="btn sm' + (done ? " ghost" : "") + '" data-act="openFood" data-id="' +
       it.id + '">' + (done ? "Edit" : "Add") + "</button></div>";
@@ -4244,11 +4483,69 @@ function openFoods() {
   openSheet("#mFoods");
 }
 
+var ROLE_LABEL = { base: "Base", protein: "Protein", topping: "Topping", side: "Side",
+  drink: "Drink", recipe: "Only in recipes" };
+var ROLE_HINT = {
+  base: "What a meal is built on — pasta, rice, oats, bread. One per meal.",
+  protein: "The main protein — tuna, chicken, eggs. One per meal; the plan picks which.",
+  topping: "Only eaten on something — cheese, sauce. Never served alone.",
+  side: "Joins any meal — fruit, veg, yoghurt.",
+  drink: "Joins any meal — milk, protein milk, juice.",
+  recipe: "Never planned by itself, only inside a recipe — oil, spices.",
+};
+
+/* How this food takes part in a meal. This is what lets the plan put
+   together "pasta + tuna + cheese" itself, so recipes are optional. */
+function roleHTML(it, f) {
+  var role = K.roleOf(f, it), guessed = !f.role;
+  var h = '<div class="f"><label>In a meal it is' + (guessed ? " (guessed — tap to confirm)" : "") +
+    '</label><div class="tags" style="margin-top:0">' +
+    K.ROLES.map(function (r) {
+      return '<button class="tg' + (r === role ? " on" : "") + '" data-act="foodrole" data-v="' + r +
+        '">' + ROLE_LABEL[r] + "</button>";
+    }).join("") + '</div><div class="hint">' + ROLE_HINT[role] + "</div></div>";
+
+  if (role === "base" || role === "protein") {
+    var alone = f.alone !== false;
+    h += '<div class="f"><label>On its own</label><div class="row">' +
+      '<button class="tg' + (alone ? " on" : "") + '" data-act="foodalone" data-v="1" style="flex:1">' +
+      "Fine alone</button>" +
+      '<button class="tg' + (alone ? "" : " on") + '" data-act="foodalone" data-v="0" style="flex:1">' +
+      (role === "protein" ? "Needs a base" : "Needs a protein or topping") + "</button></div></div>";
+  }
+  if (role === "topping" || (role === "protein" && f.alone === false)) {
+    var hostRoles = role === "topping" ? ["base", "protein"] : ["base"];
+    var gw = f.goesWith || [];
+    var hosts = S.items.filter(function (x) {
+      var g = nutOf().foods[x.id];
+      return x.id !== it.id && g && hostRoles.indexOf(K.roleOf(g, x)) >= 0;
+    });
+    (nutOf().recipes || []).forEach(function (r) { hosts.push({ id: "r:" + r.id, name: r.name || "Recipe" }); });
+    h += '<div class="f"><label>Goes with</label><div class="tags" style="margin-top:0">' +
+      '<button class="tg' + (gw.length ? "" : " on") + '" data-act="foodwith" data-v="">Anything</button>' +
+      hosts.map(function (x) {
+        return '<button class="tg' + (gw.indexOf(x.id) >= 0 ? " on" : "") + '" data-act="foodwith" ' +
+          'data-v="' + esc(x.id) + '">' + esc(x.name) + "</button>";
+      }).join("") + "</div>" +
+      '<div class="hint">Cheese with pasta and eggs but not with oats: tap those two.</div></div>';
+  }
+  if (role === "topping") {
+    h += '<div class="f"><label>At most, servings per serving of what it goes on</label>' +
+      '<input type="number" min="0" step="any" inputmode="decimal" value="' +
+      (Number(f.ratio) > 0 ? f.ratio : 1) + '" data-act="foodset" data-f="ratio"></div>';
+  }
+  return h;
+}
+
 /* Which meals a dish may go in, and how finely it may be portioned. Shared by
    the food and the recipe editor, because to the planner both are a dish. */
 function dishOptsHTML(o, kind) {
-  var n = Number(nutOf().meals) || 3, sel = o.meals || [];
-  var h = '<div class="f"><label>Eaten at</label><div class="tags" style="margin-top:0">';
+  var n = Number(nutOf().meals) || 3;
+  var nm0 = kind === "recipe" ? o.name : (byId(FOOD.id) || {}).name;
+  var guessed = !Array.isArray(o.meals);
+  var sel = K.mealsOf(o, nm0, nutOf()) || [];
+  var h = '<div class="f"><label>Eaten at' + (guessed && sel.length ? " (guessed — tap to change)" : "") +
+    '</label><div class="tags" style="margin-top:0">';
   h += '<button class="tg' + (sel.length ? "" : " on") + '" data-act="dishmeal" data-kind="' +
     kind + '" data-m="-1">Any meal</button>';
   for (var m = 0; m < n; m++) {
@@ -4299,7 +4596,9 @@ function claudeRequest() {
     });
     var o = { id: it.id, name: it.name, unit: it.unit, perMonth: it.perMonth, products: products };
     if (f && f.product) o.product = f.product;
-    if (f) o.current = { per: f.per, serving: f.serving, gi: f.gi, soloOk: f.soloOk !== false,
+    if (f) o.current = { per: f.per, serving: f.serving, gi: f.gi, role: K.roleOf(f, it),
+      alone: f.alone !== false, goesWith: (f.goesWith || []).map(function (g) {
+        var x = byId(g); return x ? x.name : g; }),
       meals: (f.meals || []).map(mealName), n: f.n };
     return o;
   });
@@ -4316,10 +4615,12 @@ function claudeRequest() {
       "Look up each product listed (brand, store) and use its label or the Danish food " +
       "database (frida.fooddata.dk) — not US values, and nothing fortified unless that exact " +
       "product is. Values are for the food AS BOUGHT: dry pasta, raw rice, uncooked oats, the " +
-      "drink as poured. Carbohydrate excludes fibre. Also suggest which of my meals each food " +
-      "suits, whether it is eaten on its own or only inside recipes, and good recipes or " +
-      "pairings from these foods (e.g. vitamin C with plant iron). Reply with ONE JSON object " +
-      "exactly in the replyFormat shape, nothing I have to edit.",
+      "drink as poured. Carbohydrate excludes fibre. Also set each food's role — base (pasta, " +
+      "rice, oats, bread: one per meal), protein (tuna, chicken, eggs: one per meal), topping " +
+      "(only on something: cheese, sauce), side, drink, or recipe (only an ingredient) — which " +
+      "of my meals it suits, and for toppings what they go with. The app builds meals from " +
+      "these roles itself, so only suggest recipes for dishes that are always made the same " +
+      "way. Reply with ONE JSON object exactly in the replyFormat shape, nothing I have to edit.",
     units: "'per' and 'serving' and recipe 'qty' are in the food's unit: kg, L or pc. " +
       "0.1 kg = 100 g. Nutrient units: " + K.NUTRIENTS.map(function (n) { return n[0] + "=" + n[2]; }).join(", "),
     meals: Array.apply(null, Array(Number(nut.meals) || 3)).map(function (_, i) { return mealName(i); }),
@@ -4328,7 +4629,8 @@ function claudeRequest() {
     replyFormat: {
       kurv: "nutrition", version: 1,
       foods: [{ id: "same id as above", name: "...", source: "product + where the figures came from",
-        per: 0.1, serving: 0.1, gi: 50, soloOk: true, meals: ["Lunch", "Dinner"], step: 1,
+        per: 0.1, serving: 0.1, gi: 50, role: "topping", alone: true, goesWith: ["Pasta", "Eggs"],
+        ratio: 1, meals: ["Lunch", "Dinner"], step: 1,
         n: { kcal: 0, protein: 0, "...": "every nutrient key above that you know" } }],
       recipes: [{ name: "...", serves: 1, meals: ["Breakfast"], step: 1, capDay: 1,
         parts: [{ id: "food id", qty: 0.1 }], note: "why this pairing",
@@ -4390,6 +4692,13 @@ function planClaudeChanges(d) {
       if (x[k] !== undefined && isFinite(v) && v >= 0) f[k] = v;
     });
     if (typeof x.soloOk === "boolean") f.soloOk = x.soloOk;
+    if (K.ROLES.indexOf(x.role) >= 0) { f.role = x.role; f.soloOk = x.role !== "recipe" && x.role !== "topping"; }
+    if (typeof x.alone === "boolean") f.alone = x.alone;
+    if (Number(x.ratio) > 0) f.ratio = Number(x.ratio);
+    if (Array.isArray(x.goesWith)) {
+      f.goesWith = x.goesWith.map(function (g) { var gi = findItem(g, g); return gi ? gi.id : null; })
+        .filter(Boolean);
+    }
     var mi = mealIdx(x.meals);
     if (mi) f.meals = mi;
     if (x.source) f.source = String(x.source);
@@ -4552,16 +4861,7 @@ function foodFormHTML(it, f) {
 
   h += dishOptsHTML(f, "food");
 
-  h += '<div class="f"><label>Is this a meal on its own?</label>' +
-    '<div class="row">' +
-    '<button class="tg' + (f.soloOk === false ? "" : " on") + '" data-act="foodsolo" ' +
-    'data-v="1" style="flex:1">Can eat it alone</button>' +
-    '<button class="tg' + (f.soloOk === false ? " on" : "") + '" data-act="foodsolo" ' +
-    'data-v="0" style="flex:1">Only in recipes</button></div>' +
-    '<div class="hint">Pasta sauce is an ingredient, not a lunch. Left eatable alone, the ' +
-    "optimiser will cheerfully serve three portions of it and no pasta, because the sauce is " +
-    "where the cheap micronutrients are and the arithmetic has no idea it is inedible by the " +
-    "bowl.</div></div>";
+  h += roleHTML(it, f);
 
   h += '<div class="row" style="margin:4px 0 10px">' +
     '<button class="btn ghost" data-act="aiFood" style="flex:1" id="aiBtn">Fill in with Gemini</button>' +
@@ -5342,9 +5642,14 @@ function renderPlan() {
         '<span class="st no">no products watched</span>');
       tags.push(hasNut ? '<span class="st">nutrition' + (f.source ? " ✓" : "") + "</span>" :
         '<span class="st no">no nutrition</span>');
-      if (f && f.soloOk === false) tags.push('<span class="st">in recipes only</span>');
-      else if (hasNut) tags.push('<span class="st">' + ((f.meals || []).length ?
-        esc(f.meals.map(mealName).join(", ")) : "any meal") + "</span>");
+      if (hasNut) {
+        var rl = K.roleOf(f, it);
+        tags.push('<span class="st' + (f.role ? "" : " no") + '">' + ROLE_LABEL[rl].toLowerCase() +
+          (f.role ? "" : "?") + "</span>");
+        var em = K.mealsOf(f, it.name, nutOf());
+        if (rl !== "recipe") tags.push('<span class="st">' + (em ?
+          esc(em.map(mealName).join(", ")) : "any meal") + "</span>");
+      }
       h += '<div class="lot"><div class="lot-m">' +
         '<div class="lot-q">' + esc(it.name) + "</div>" +
         '<div class="lot-s"><span class="num">' + K.fmtQty(it.perMonth, it.unit) + "</span> " +
@@ -6095,6 +6400,8 @@ function render() {
 document.addEventListener("click", function (e) {
   var nav = e.target.closest("nav button");
   if (nav) { TAB = nav.dataset.tab; window.scrollTo(0, 0); render(); return; }
+  var tabBtn = e.target.closest('[data-act="tab"]');
+  if (tabBtn) { TAB = tabBtn.dataset.tab; window.scrollTo(0, 0); render(); return; }
 
   var modal = e.target.closest(".modal");
   if (modal && e.target === modal) { closeSheets(); return; }
@@ -6340,7 +6647,8 @@ document.addEventListener("click", function (e) {
     if (dmo) {
       if (dm < 0) dmo.meals = [];
       else {
-        var cur = (dmo.meals || []).slice(), at = cur.indexOf(dm);
+        var nmD = b.dataset.kind === "recipe" ? dmo.name : (byId(FOOD.id) || {}).name;
+        var cur = (K.mealsOf(dmo, nmD, nutOf()) || []).slice(), at = cur.indexOf(dm);
         if (at >= 0) cur.splice(at, 1); else cur.push(dm);
         cur.sort();
         dmo.meals = cur;
@@ -6358,13 +6666,32 @@ document.addEventListener("click", function (e) {
     var nmo = dishByKey(b.dataset.key), nm0 = Number(b.dataset.m);
     if (nmo) {
       var nMeals = Number(nutOf().meals) || 3, ok = [];
-      var base = (nmo.meals && nmo.meals.length) ? nmo.meals : Array.apply(null, Array(nMeals)).map(function (_, i) { return i; });
+      var nmK = b.dataset.key.indexOf("i:") === 0 ? (byId(b.dataset.key.slice(2)) || {}).name : nmo.name;
+      var eff = K.mealsOf(nmo, nmK, nutOf());
+      var base = eff ? eff : Array.apply(null, Array(nMeals)).map(function (_, i) { return i; });
       base.forEach(function (x) { if (x !== nm0 && x < nMeals) ok.push(x); });
       if (!ok.length) { toast("That is the only meal it is set for. Edit it to choose another."); return; }
       nmo.meals = ok;
       save(); nutTouched(); plateToday(true); render();
       toast("Now only at " + ok.map(mealName).join(", ").toLowerCase() + ".");
     }
+    return;
+  }
+  if (act === "saveMeal") {
+    var pr0 = plateToday(), mm0 = Number(b.dataset.m);
+    var rowS = pr0 && pr0.plate && pr0.plate[mm0];
+    if (!rowS || !rowS.length) return;
+    var parts0 = {};
+    rowS.forEach(function (e) {
+      for (var iid in e.dish.uses) parts0[iid] = (parts0[iid] || 0) + e.dish.uses[iid] * e.servings;
+    });
+    var nmS = rowS.map(function (e) { return e.dish.name; }).join(" + ");
+    var rnew = { id: uid(), name: nmS, serves: 1, capDay: 1, ownNut: false, meals: [mm0], step: 1,
+      parts: Object.keys(parts0).map(function (k) { return { itemId: k, qty: +parts0[k].toFixed(4) }; }) };
+    nutOf().recipes.push(rnew);
+    save(); nutTouched();
+    toast("Saved as a recipe: " + nmS + ".");
+    RCP.back = false; openRecipe(rnew.id);
     return;
   }
   if (act === "editDish") {
@@ -6392,6 +6719,26 @@ document.addEventListener("click", function (e) {
     var pmS = nutOf().perMeal;
     pmS.soft = pmS.soft === false;
     save(); nutTouched(); $("#perMealBody").innerHTML = perMealHTML();
+    return;
+  }
+  if (act === "foodrole" || act === "foodalone" || act === "foodwith") {
+    var fr = nutOf().foods[FOOD.id];
+    if (fr) {
+      if (act === "foodrole") {
+        fr.role = b.dataset.v;
+        fr.soloOk = fr.role !== "recipe" && fr.role !== "topping";
+      } else if (act === "foodalone") fr.alone = b.dataset.v === "1";
+      else {
+        var v0 = b.dataset.v, gw0 = (fr.goesWith || []).slice();
+        if (!v0) gw0 = [];
+        else if (gw0.indexOf(v0) >= 0) gw0.splice(gw0.indexOf(v0), 1);
+        else gw0.push(v0);
+        fr.goesWith = gw0;
+      }
+      if (!fr.role) fr.role = K.roleOf(fr, byId(FOOD.id));
+      save(); nutTouched();
+      $("#foodBody").innerHTML = foodFormHTML(byId(FOOD.id), fr);
+    }
     return;
   }
   if (act === "foodsolo") {

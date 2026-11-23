@@ -101,8 +101,13 @@ setTimeout(() => {
   check("Plan row has a Food button", !!fb);
   fb.click();
   check("food editor shows meal chips", doc.querySelectorAll('#foodBody [data-act="dishmeal"]').length === 5);
+  check("pasta guessed lunch/dinner before anything is tapped", /guessed/.test($("#foodBody").textContent) &&
+    JSON.stringify(K.mealsOf(nut.foods.pas, "Pasta", nut)) === "[1,2]");
   doc.querySelector('#foodBody [data-act="dishmeal"][data-m="2"]').click();
-  check("tapping Dinner tags pasta", JSON.stringify(nut.foods.pas.meals) === "[2]");
+  check("tapping Dinner takes it off the guess", JSON.stringify(nut.foods.pas.meals) === "[1]");
+  doc.querySelector('#foodBody [data-act="dishmeal"][data-m="-1"]').click();
+  doc.querySelector('#foodBody [data-act="dishmeal"][data-m="2"]').click();
+  check("Any meal, then Dinner -> dinner only", JSON.stringify(nut.foods.pas.meals) === "[2]");
   doc.querySelector('#foodBody [data-act="dishmeal"][data-m="-1"]').click();
   check("Any meal clears it", nut.foods.pas.meals.length === 0);
   doc.querySelector('#foodBody [data-act="dishstep"][data-v="0"]').click();
