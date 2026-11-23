@@ -67,10 +67,9 @@ setTimeout(() => {
   console.log("\nEAT TAB");
   $('nav button[data-tab="eat"]').click();
   const eat = $("#eatBody").textContent.replace(/\s+/g, " ");
-  check("says it is not a full day", /This is not a full day/.test(eat));
-  const m = eat.match(/best possible is (\S+) kcal and (\d+) g protein, and (\d+) of (\d+)/);
-  console.log("        \"" + (m ? m[0] : "?") + "\"");
-  check("names Cheese as having no nutrition", /No nutrition yet: Cheese/.test(eat));
+  check("diary header: goal − eaten − suggested = left", /Calories remaining/.test(eat) && /Suggested/.test(eat));
+  check("says what the cupboard cannot cover", /Your cupboard cannot cover/.test(eat),
+    (eat.match(/Your cupboard cannot cover[^.]*\./) || [""])[0].slice(0, 140));
   check("flags the pasta cooked/dry mismatch", /Pasta dish says 410 kcal/.test(eat) && /cooked/.test(eat), 
     (eat.match(/Pasta dish says[^.]*\./) || [""])[0]);
   check("names the culprit and its per-100 g figure", /Pasta \(131 kcal per 100 g as entered\)/.test(eat));

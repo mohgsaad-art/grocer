@@ -47,7 +47,9 @@ function verify(r, tag) {
       const room = hosts.reduce((a, e) => a + e.servings, 0) * (foods[t.dish.id].ratio || 1);
       if (!hosts.length || t.servings > room + 1e-6) tops = false;
     });
-    if (p.some((e) => e.dish.id === "oat") && p.some((e) => e.dish.id === "ost")) oatsCheese = true;
+    // cheese may share a meal with oats only if something it goes with is there too
+    if (p.some((e) => e.dish.id === "oat") && p.some((e) => e.dish.id === "ost") &&
+        !p.some((e) => ["pas", "egg", "ris"].indexOf(e.dish.id) >= 0)) oatsCheese = true;
     p.forEach((e) => { if (Math.abs(e.servings - Math.round(e.servings)) > 1e-6) whole = false; });
   });
   check(tag + ": at most one base and one protein per meal", one);
@@ -61,6 +63,7 @@ let t0 = Date.now();
 let r = K.planDay(items, nut, T, { unitPrice: (i) => price[i.id] });
 show(r); verify(r, "cupboard");
 check("chicken that spoils soon gets eaten", r.plate.flat().some((e) => e.dish.id === "kyl"));
+check("pasta split over lunch and dinner, not 200 g in one", r.plate.every((p) => p.filter((e) => e.dish.id === "pas").every((e) => e.servings <= 1)));
 check("pasta only at lunch/dinner", r.plate.every((p, m) => !p.some((e) => e.dish.id === "pas") || m === 1 || m === 2));
 check("fast enough for a phone (" + (Date.now() - t0) + " ms)", Date.now() - t0 < 2000);
 

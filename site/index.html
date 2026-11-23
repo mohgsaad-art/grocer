@@ -290,6 +290,44 @@ svg.chart{width:100%;height:148px;display:block;margin-top:4px}
 .st{display:inline-block;font-size:10.5px;padding:1px 7px;border-radius:9px;margin:3px 4px 0 0;
   background:var(--rule);color:var(--mute)}
 .st.no{background:var(--needbg);color:var(--need)}
+/* diary, MyFitnessPal-shaped */
+.cal{display:flex;align-items:flex-end;justify-content:space-between;gap:2px;margin-top:4px}
+.cal div{text-align:center;flex:1;min-width:0}
+.cal b{display:block;font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:17px;font-weight:600}
+.cal span{font-size:10.5px;color:var(--faint)}
+.cal i{font-style:normal;color:var(--faint);padding-bottom:16px}
+.cal .rem b{font-size:22px}
+.cal .rem.neg b{color:var(--gone)}
+.mac{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-top:14px}
+.mac .l{font-size:11px;color:var(--mute)}
+.mac .v{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:15px;font-weight:600}
+.mac .v small{font-weight:400;color:var(--faint);font-size:11px}
+.bar2{height:6px;background:var(--rule2);border-radius:3px;overflow:hidden;display:flex;margin:5px 0 3px}
+.bar2 i{display:block;height:100%}
+.bar2 i.e{background:var(--ink)}
+.bar2 i.p{background:var(--faint);opacity:.45}
+.bar2 i.e.over{background:var(--gone)}
+.meal-h{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2px}
+.meal-h b{font-size:15px}
+.meal-h span{font-size:12px;color:var(--mute)}
+.dx{display:flex;align-items:center;gap:8px;padding:9px 0;border-bottom:1px solid var(--rule2)}
+.dx-m{flex:1;min-width:0}
+.dx-n{font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dx-s{font-size:11.5px;color:var(--mute);margin-top:1px}
+.dx.sug .dx-n{color:var(--mute)}
+.dx-k{font-family:var(--mono);font-size:13px;font-variant-numeric:tabular-nums}
+.sugh{font-size:10px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--faint);margin-top:10px}
+.ins{font-size:11.5px;color:var(--mute);margin-top:8px}
+.nt{display:grid;grid-template-columns:1fr auto auto auto;column-gap:14px;row-gap:0;font-size:13px}
+.nt>*{padding:6px 0;border-bottom:1px solid var(--rule2)}
+.nt .h{font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--faint)}
+.nt .n{font-family:var(--mono);font-variant-numeric:tabular-nums;text-align:right;font-size:12px}
+.nt .lo2{color:var(--need)}
+.nt .ok2{color:var(--deal)}
+.nt .ov2{color:var(--gone)}
+.seg{display:flex;background:var(--rule2);border-radius:9px;padding:3px;margin-bottom:10px}
+.seg button{flex:1;padding:6px;border-radius:7px;font-size:12.5px;color:var(--mute)}
+.seg button.on{background:var(--card);color:var(--ink);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.06)}
 details.more{margin-top:18px}
 details.more>summary{cursor:pointer;font-size:13px;font-weight:600;color:var(--mute);
   padding:10px 2px;list-style:none}
@@ -643,6 +681,16 @@ nav .pip{position:absolute;top:7px;right:calc(50% - 19px);min-width:15px;height:
       <button class="btn ghost" data-act="planCSVCopy">Copy</button>
       <button class="btn" data-act="applyPlanCSV">Read it in</button>
     </div>
+  </div>
+</div>
+
+<!-- Add to the diary ------------------------------------------------------ -->
+<div class="modal" id="mLog">
+  <div class="sheet tall">
+    <h3>Add food</h3>
+    <div class="sub">What you actually ate. From the cupboard it comes off the stock.</div>
+    <div id="logBody"></div>
+    <div class="row"><button class="btn ghost" data-act="close">Close</button></div>
   </div>
 </div>
 
@@ -1903,7 +1951,10 @@ var Kurv = (function () {
           ? foods[it.id].goesWith : null,
         ratio: Number(foods[it.id].ratio) > 0 ? Number(foods[it.id].ratio) : 1,
         capDay: capOf(foods[it.id].capDay, 3),
-        capMeal: capOf(foods[it.id].capMeal, 0),
+        // One serving of a base per meal unless told otherwise: 200 g of pasta
+        // at lunch and none at dinner is cheaper on paper and not how anyone
+        // eats.
+        capMeal: capOf(foods[it.id].capMeal, role === "base" ? 1 : 0),
       });
     }
 
@@ -1957,7 +2008,7 @@ var Kurv = (function () {
         role: r.role === "side" || r.role === "protein" ? r.role : "base",
         alone: true, goesWith: null, ratio: 1,
         capDay: capOf(r.capDay, 2),
-        capMeal: capOf(r.capMeal, 0),
+        capMeal: capOf(r.capMeal, 1),
       });
     }
     return dishes;
@@ -2014,6 +2065,15 @@ var Kurv = (function () {
     var byId = {}, i, j, m, k;
     for (i = 0; i < items.length; i++) byId[items[i].id] = items[i];
 
+    // What has already been eaten today: those meals are done and are not
+    // planned again, and the rest of the day is planned against what is left
+    // of each target.
+    var eaten = opts.eaten || null;
+    var done = {};
+    if (eaten && eaten.done) for (i = 0; i < eaten.done.length; i++) done[eaten.done[i]] = 1;
+    var openMeals = 0;
+    for (m = 0; m < meals; m++) if (!done[m]) openMeals++;
+
     // Only the items some dish actually uses become stock/buy variables.
     var itemIds = [];
     var seen = {};
@@ -2022,6 +2082,21 @@ var Kurv = (function () {
     }
 
     var targets = nut.targets || {};
+    var dayTargets = targets;
+    if (eaten && eaten.n) {
+      targets = {};
+      for (var tk0 in dayTargets) {
+        var t0 = dayTargets[tk0];
+        if (!t0) continue;
+        var got0 = Number(eaten.n[tk0]) || 0, nt = {};
+        for (var f0 in t0) nt[f0] = t0[f0];
+        if (t0.min > 0) nt.min = t0.min - got0 > t0.min * 0.01 ? t0.min - got0 : 0;
+        // A ceiling already reached still has to bind, so it cannot simply
+        // drop out at zero; a sliver of room keeps the row well scaled.
+        if (t0.max > 0) nt.max = Math.max(t0.max - got0, t0.max * 0.02);
+        targets[tk0] = nt;
+      }
+    }
     var perMeal = nut.perMeal || {};
     function wOf(t) { var w = Number(t && t.w); return w > 0 ? w : 1; }
 
@@ -2034,7 +2109,7 @@ var Kurv = (function () {
     for (i = 0; i < dishes.length; i++) {
       xIdx.push([]);
       for (m = 0; m < meals; m++) {
-        var allowed = !dishes[i].meals || dishes[i].meals.indexOf(m) >= 0;
+        var allowed = !done[m] && (!dishes[i].meals || dishes[i].meals.indexOf(m) >= 0);
         xIdx[i].push(allowed ? nVars++ : -1);
       }
     }
@@ -2122,6 +2197,13 @@ var Kurv = (function () {
       cons.push(rA);
     }
 
+    // Eating only from the cupboard: the shop is the buying side's job.
+    if (opts.stockOnly) {
+      for (j = 0; j < itemIds.length; j++) {
+        var rS = row("<=", 0); rS.a[byIdx[itemIds[j]]] = 1; cons.push(rS);
+      }
+    }
+
     // --- (B) the cupboard is finite
     for (j = 0; j < itemIds.length; j++) {
       var rB = row("<=", avail[itemIds[j]]);
@@ -2181,6 +2263,7 @@ var Kurv = (function () {
     // were soft the model could eat without limit to collect credit; this makes
     // the program bounded no matter how the settings are left.
     cons.push(nutRow("kcal", "<=", kcalMax * 2.5));
+    var kcalDay = (dayTargets.kcal && dayTargets.kcal.max) || kcalMax;
 
     // --- (E,F,G) per-meal limits
     var pm = Number(perMeal.protein) > 0 ? Number(perMeal.protein) : 0;
@@ -2234,7 +2317,7 @@ var Kurv = (function () {
       if (km > 0 && km < 1) {
         var rK = row("<=", 1);
         for (i = 0; i < dishes.length; i++) if (xIdx[i][m] >= 0) {
-          rK.a[xIdx[i][m]] = (Number(dishes[i].n.kcal) || 0) / (kcalMax * km);
+          rK.a[xIdx[i][m]] = (Number(dishes[i].n.kcal) || 0) / (kcalDay * km);
         }
         if (mealSoft && mkIdx[m] >= 0) { rK.a[mkIdx[m]] = -1; obj[mkIdx[m]] = OVER_PRICE * mw; }
         cons.push(rK);
@@ -2480,7 +2563,7 @@ var Kurv = (function () {
       if (mpIdx[m] >= 0 && sol.x[mpIdx[m]] > 1e-3) mo.protein = sol.x[mpIdx[m]] * pm;
       if (mglIdx[m] >= 0 && sol.x[mglIdx[m]] > 1e-3) mo.gl = sol.x[mglIdx[m]] * glm;
       if (mgiIdx[m] >= 0 && sol.x[mgiIdx[m]] > 1e-3) mo.gi = sol.x[mgiIdx[m]];
-      if (mkIdx[m] >= 0 && sol.x[mkIdx[m]] > 1e-3) mo.kcal = sol.x[mkIdx[m]] * kcalMax * km;
+      if (mkIdx[m] >= 0 && sol.x[mkIdx[m]] > 1e-3) mo.kcal = sol.x[mkIdx[m]] * kcalDay * km;
       mealOver.push(mo);
     }
 
@@ -3005,8 +3088,6 @@ function renderToday() {
   var html = "";
 
   if (CAT.error) html += '<div class="note"><span>' + esc(CAT.error) + "</span></div>";
-
-  html += todayPlateHTML();
 
   var act = views.filter(function (v) { return v.d.state !== "ok" && v.d.state !== "off"; });
   var calm = views.filter(function (v) { return v.d.state === "ok" || v.d.state === "off"; });
@@ -3877,8 +3958,11 @@ function plateToday(force) {
   var t = K.today();
   var nut = nutOf();
   if (!force && PLATE.res && PLATE.day === t && PLATE.stamp === nut.stamp) return PLATE.res;
+  var eatenNow = dayEaten(t);
   var res = K.planDay(S.items, nut, t, {
     unitPrice: eatUnitPrice,
+    stockOnly: true,
+    eaten: { n: eatenNow.n, done: eatenNow.done },
     recipePref: Number(nut.recipePref) >= 0 ? Number(nut.recipePref) : 1.5,
     dayBudget: Number(nut.dayBudget) > 0 ? Number(nut.dayBudget) : 0,
   });
@@ -3898,6 +3982,160 @@ function foodCount() {
   return n;
 }
 
+/* ================================================================ the diary
+ *
+ * The Eat tab is a food diary with a planner inside it. What you logged is
+ * fact; what is left of the day is filled with suggestions from the cupboard,
+ * re-planned against what is left of each target every time you log. Nothing
+ * here buys anything — that is the Today tab's job.
+ */
+var EATVIEW = "day";
+
+function diaryOf() { var n = nutOf(); if (!Array.isArray(n.diary)) n.diary = []; return n.diary; }
+function entriesOn(day) { return diaryOf().filter(function (e) { return e.day === day; }); }
+
+/** Nutrition of `qty` (canonical units) of one item, from its food entry. */
+function foodNut(itemId, qty) {
+  var f = nutOf().foods[itemId], it = byId(itemId);
+  if (!f || !it || !f.n) return null;
+  var per = Number(f.per) > 0 ? Number(f.per) : K.defaultServing(it.unit);
+  var sc = qty / per, n = K.emptyNut();
+  for (var k in n) n[k] = (Number(f.n[k]) || 0) * sc;
+  return { n: n, giCarb: n.carb * (Number(f.gi) || 0) };
+}
+
+/* An entry's nutrition is worked out from its ingredients each time, so
+   correcting a food's figures corrects the diary too. Only food from outside
+   the cupboard carries its own numbers. */
+function entryNut(e) {
+  var out = { n: K.emptyNut(), giCarb: 0 }, k;
+  if (e.recipeId) {
+    var r = (nutOf().recipes || []).filter(function (x) { return x.id === e.recipeId; })[0];
+    if (r && r.ownNut && r.n) {
+      for (k in out.n) out.n[k] = (Number(r.n[k]) || 0) * (e.servings || 1);
+      out.giCarb = out.n.carb * (Number(r.gi) || 0);
+      return out;
+    }
+  }
+  if (e.n) {
+    for (k in out.n) out.n[k] = Number(e.n[k]) || 0;
+    out.giCarb = out.n.carb * (Number(e.gi) || 0);
+    return out;
+  }
+  (e.parts || []).forEach(function (p) {
+    var fn = foodNut(p.itemId, p.qty);
+    if (!fn) return;
+    for (k in out.n) out.n[k] += fn.n[k];
+    out.giCarb += fn.giCarb;
+  });
+  return out;
+}
+
+function addNut(acc, x, mult) {
+  mult = mult === undefined ? 1 : mult;
+  for (var k in acc.n) acc.n[k] += (Number(x.n[k]) || 0) * mult;
+  acc.giCarb = (acc.giCarb || 0) + (x.giCarb || 0) * mult;
+  return acc;
+}
+
+function dayEaten(day) {
+  var acc = { n: K.emptyNut(), giCarb: 0 }, done = {};
+  entriesOn(day).forEach(function (e) { addNut(acc, entryNut(e)); done[e.meal] = 1; });
+  acc.done = Object.keys(done).map(Number);
+  return acc;
+}
+
+/* A planned dish as the same shape as a diary entry's nutrition. */
+function planNut(e) {
+  return { n: e.dish.n, giCarb: e.dish.giCarb || 0 };
+}
+
+/* Take food off the shelf, remembering exactly which packs it came from so
+   that deleting the entry puts it back where it was. */
+function takeLots(it, qty) {
+  var t = K.today(), recs = [], need = qty;
+  var order = K.fefo(it.lots || [], it.openLife || 0);
+  for (var i = 0; i < order.length && need > 1e-9; i++) {
+    var lot = order[i];
+    if (lot.qty <= 1e-9) continue;
+    var take = Math.min(lot.qty, need);
+    var snap = JSON.parse(JSON.stringify(lot));
+    snap.took = take;
+    recs.push(snap);
+    if (lot.open === null || lot.open === undefined) lot.open = t;
+    lot.qty -= take;
+    need -= take;
+  }
+  it.lots = (it.lots || []).filter(function (l) { return l.qty > 1e-9; });
+  return { recs: recs, short: need > 1e-9 ? need : 0 };
+}
+
+function logEntry(meal, name, uses, opt) {
+  opt = opt || {};
+  var parts = [], short = [];
+  for (var id in uses) {
+    var it = byId(id);
+    if (!it || !(uses[id] > 0)) continue;
+    var tk = opt.fromStock === false ? { recs: [], short: 0 } : takeLots(it, uses[id]);
+    parts.push({ itemId: id, qty: uses[id], lots: tk.recs });
+    if (tk.short) short.push(K.fmtQty(tk.short, it.unit) + " " + K.UNIT_LABEL[it.unit] + " " + it.name.toLowerCase());
+  }
+  var e = { id: uid(), ts: Date.now(), day: K.today(), meal: meal, name: name,
+    servings: opt.servings || 1, recipeId: opt.recipeId || null, key: opt.key || null, parts: parts };
+  if (opt.n) { e.n = opt.n; e.gi = opt.gi || 0; }
+  diaryOf().push(e);
+  if (diaryOf().length > 3000) nutOf().diary = diaryOf().slice(-3000);
+  return short;
+}
+
+function unlog(id) {
+  var d = diaryOf(), at = -1;
+  for (var i = 0; i < d.length; i++) if (d[i].id === id) at = i;
+  if (at < 0) return;
+  (d[at].parts || []).forEach(function (p) {
+    var it = byId(p.itemId);
+    if (!it) return;
+    (p.lots || []).forEach(function (rec) {
+      var lot = (it.lots || []).filter(function (l) { return l.id === rec.id; })[0];
+      if (lot) {
+        lot.qty += rec.took;
+        if (rec.open === null || rec.open === undefined) lot.open = rec.open;
+      } else {
+        var c = JSON.parse(JSON.stringify(rec));
+        delete c.took;
+        c.qty = rec.took;
+        it.lots.push(c);
+      }
+    });
+  });
+  d.splice(at, 1);
+}
+
+function entryAmount(e) {
+  if (e.recipeId) return (+(e.servings || 1).toFixed(2)) + (e.servings === 1 ? " serving" : " servings");
+  if (e.parts && e.parts.length === 1) {
+    var it = byId(e.parts[0].itemId);
+    if (it) return K.fmtQty(e.parts[0].qty, it.unit) + " " + K.UNIT_LABEL[it.unit];
+  }
+  return e.n ? "outside the cupboard" : "";
+}
+
+function dishAmount(e) {
+  var d = e.dish, it = d.kind === "item" ? byId(d.id) : null;
+  if (it) return K.fmtQty(d.uses[d.id] * e.servings, it.unit) + " " + K.UNIT_LABEL[it.unit];
+  return (+e.servings.toFixed(2)) + (e.servings === 1 ? " serving" : " servings");
+}
+
+/* Non-haem iron is the iron in grains, pulses, eggs and greens, and how much
+   of it you take up depends on the company it keeps: vitamin C in the same
+   meal roughly doubles it, a lot of calcium cuts it. A rough guide, which is
+   exactly what a calorie app will not even attempt. */
+function ironLift(n) {
+  var lift = 1 + Math.min(1, (Number(n.vitc) || 0) / 50) * 0.8;
+  if ((Number(n.calcium) || 0) > 300) lift *= 0.8;
+  return lift;
+}
+
 function renderEat() {
   var body = $("#eatBody");
   var nut = nutOf();
@@ -3906,181 +4144,354 @@ function renderEat() {
   if (foodCount() === 0) {
     body.innerHTML =
       '<div class="card"><div class="hsub" style="margin:0 0 6px">Nothing to work with yet</div>' +
-      "<div class=\"hint\">This plans a day's eating against your targets, your budget prices " +
-      "and what is already in the cupboard — cheapest day that still hits the numbers, " +
-      "preferring food that is about to turn.<br><br>It needs nutrition for at least a " +
-      "couple of the things on your plan. Add it by hand, or paste a Gemini key and let it " +
-      "fill them in.</div>" +
+      "<div class=\"hint\">This is a food diary that also suggests what to eat from your " +
+      "cupboard. It needs nutrition for the foods you have.</div>" +
       '<div class="row" style="margin-top:12px">' +
-      '<button class="btn" data-act="openFoods" style="flex:1">Set up foods</button></div></div>';
+      '<button class="btn" data-act="openClaude" style="flex:1">Exact nutrition from Claude</button></div>' +
+      '<div class="row"><button class="btn ghost" data-act="openFoods" style="flex:1">Foods</button></div></div>';
     return;
   }
 
+  var t = K.today();
+  var eaten = dayEaten(t);
   var r = plateToday();
-  if (!r.ok) {
-    var why = r.why === "nodishes"
-      ? "None of your foods have a complete nutrition entry yet."
-      : "The solver could not find a day (" + esc(r.why) + ").";
-    body.innerHTML = '<div class="card"><div class="hint">' + why + "</div>" +
-      '<div class="row" style="margin-top:12px">' +
-      '<button class="btn ghost" data-act="openFoods" style="flex:1">Foods</button>' +
-      '<button class="btn ghost" data-act="openTargets" style="flex:1">Targets</button></div></div>';
-    return;
-  }
+  var plan = { n: K.emptyNut(), giCarb: 0 };
+  if (r.ok) r.plate.forEach(function (row) { row.forEach(function (e) { addNut(plan, planNut(e), e.servings); }); });
+  var tg = nut.targets || {};
+  var ents = entriesOn(t);
 
-  // ---- before anything else: is this a real day, and do the numbers agree?
-  var nutS = nutOf();
-  (nutS.recipes || []).forEach(function (rc) {
+  (nut.recipes || []).forEach(function (rc) {
     var mm2 = recipeMismatch(rc);
     if (mm2) h += '<div class="warn" style="display:block">' + mismatchText(rc, mm2) + "</div>";
   });
 
-  var tg = nutS.targets || {};
-  var kShort = r.missed.filter(function (x) { return x.key === "kcal"; })[0];
-  var pShort = r.missed.filter(function (x) { return x.key === "protein"; })[0];
-  var nMin = 0;
-  for (var kk0 in tg) if (tg[kk0] && tg[kk0].min > 0) nMin++;
-  if ((kShort && kShort.frac > 0.15) || (pShort && pShort.frac > 0.15) || r.missed.length > nMin / 2) {
-    var noNut = S.items.filter(function (i) { return !(nutS.foods || {})[i.id]; }).map(function (i) { return i.name; });
-    var solo = S.items.filter(function (i) {
-      var f = (nutS.foods || {})[i.id]; return f && K.roleOf(f, i) === "recipe";
-    }).length;
-    // Without this, a green bar for iron sits next to a day that is half a day,
-    // and reads as "iron is fine" when it means "this is everything you have".
-    h += '<div class="note" style="display:block"><b>This is not a full day.</b> With the foods ' +
-      "set up so far, the best possible is <b>" + Math.round(r.totals.kcal) + " kcal</b> and <b>" +
-      (+r.totals.protein.toFixed(0)) + " g protein</b>, and " + r.missed.length + " of " + nMin +
-      " targets fall short — it eats every serving its limits allow and still runs out. Any " +
-      "target that does show as met is met by that, so do not read much into it yet." +
-      (noNut.length ? "<br><br>No nutrition yet: <b>" + esc(noNut.join(", ")) + "</b>." : "") +
-      (solo ? "<br>" + solo + (solo === 1 ? " food is" : " foods are") + " set to only appear " +
-        "inside recipes, so they add nothing on their own." : "") +
-      '<div class="row" style="margin-top:8px"><button class="btn sm" data-act="openFoods" ' +
-      'style="flex:1">Foods</button><button class="btn sm ghost" data-act="openRecipes" ' +
-      'style="flex:1">Recipes</button></div></div>';
+  // ---- calories: goal − eaten − planned = left
+  var goalK = tg.kcal ? (Number(tg.kcal.min) || Number(tg.kcal.max) || 0) : 0;
+  var eK = eaten.n.kcal, pK = plan.n.kcal, left = goalK - eK - pK;
+  h += '<div class="card"><div class="hsub" style="margin:0">Calories remaining</div>' +
+    '<div class="cal"><div><b>' + Math.round(goalK) + "</b><span>Goal</span></div><i>−</i>" +
+    "<div><b>" + Math.round(eK) + "</b><span>Eaten</span></div><i>−</i>" +
+    "<div><b>" + Math.round(pK) + "</b><span>Suggested</span></div><i>=</i>" +
+    '<div class="rem' + (left < 0 ? " neg" : "") + '"><b>' + Math.round(left) + "</b><span>Left</span></div></div>";
+
+  // ---- macros
+  var macs = [["carb", "Carbs", 4], ["fat", "Fat", 9], ["protein", "Protein", 4]];
+  var kcalTot = Math.max(1, eK + pK);
+  h += '<div class="mac">';
+  macs.forEach(function (mc) {
+    var key = mc[0], e1 = eaten.n[key] || 0, p1 = plan.n[key] || 0, tt = tg[key] || {};
+    var goal = Number(tt.min) > 0 ? Number(tt.min) : (Number(tt.max) > 0 ? Number(tt.max) : 0);
+    var ref = goal || Math.max(e1 + p1, 1);
+    var we = Math.min(100, e1 / ref * 100), wp = Math.min(100 - we, p1 / ref * 100);
+    var over = goal && Number(tt.max) > 0 && e1 + p1 > Number(tt.max);
+    h += '<div><div class="l">' + mc[1] + "</div>" +
+      '<div class="v">' + Math.round(e1 + p1) + "<small> " + (goal ? "/ " + Math.round(goal) + " g" : "g") + "</small></div>" +
+      '<div class="bar2"><i class="e' + (over ? " over" : "") + '" style="width:' + we.toFixed(1) + '%"></i>' +
+      '<i class="p" style="width:' + wp.toFixed(1) + '%"></i></div>' +
+      '<div class="l">' + Math.round((e1 + p1) * mc[2] / kcalTot * 100) + "% of energy</div></div>";
+  });
+  h += "</div>" +
+    '<div class="ins">Dark is eaten, light is what is suggested for the rest of today. ' +
+    "Everything suggested comes from your cupboard.</div></div>";
+
+  if (!r.ok) {
+    h += '<div class="note" style="display:block">' + (r.why === "nodishes"
+      ? "None of the food in your cupboard has nutrition yet, so there is nothing to suggest."
+      : "Could not plan the rest of the day (" + esc(r.why) + ").") + "</div>";
   }
 
-  // ---- the day in one line of money, which is the trade-off being made
-  h += '<div class="card">' +
-    '<div class="hsub" style="margin:0 0 6px">Today\'s plate</div>' +
-    '<div class="big">' + K.kr0(r.cost) + "</div>" +
-    '<div class="gsub"><span>to buy</span><span><b class="num">' + K.kr0(r.stockValue) +
-    "</b> already in the cupboard</span></div>";
-  if (r.missed.length) {
-    h += '<div class="hint" style="margin-top:10px">Cheapest day that gets closest to your ' +
-      "targets. <b>" + r.missed.length +
-      (r.missed.length === 1 ? " floor it could not reach" : " floors it could not reach") +
-      "</b> — listed below, with what is missing.</div>";
-  } else {
-    h += '<div class="hint" style="margin-top:10px">Cheapest day that meets every floor you set.</div>';
-  }
-  h += "</div>";
-
-  // ---- the plate itself
-  for (var m = 0; m < r.meals; m++) {
-    var row = r.plate[m];
-    row = sortMeal(row);
-    h += '<h2>' + esc(mealName(m)) + (row.length ? " · " + esc(row.map(function (e) {
-      return e.dish.name; }).join(" + ")) : "") + "</h2>";
-    if (!row.length) {
-      h += '<div class="card"><div class="hint">Nothing here — the day fits in the other meals.</div></div>';
-      continue;
+  // ---- the diary, meal by meal
+  for (var m = 0; m < (Number(nut.meals) || 3); m++) {
+    var mine = ents.filter(function (e) { return e.meal === m; });
+    var sug = r.ok && r.plate[m] ? sortMeal(r.plate[m]) : [];
+    var mAcc = { n: K.emptyNut(), giCarb: 0 };
+    mine.forEach(function (e) { addNut(mAcc, entryNut(e)); });
+    sug.forEach(function (e) { addNut(mAcc, planNut(e), e.servings); });
+    h += '<div class="card"><div class="meal-h"><b>' + esc(mealName(m)) + "</b><span class=\"num\">" +
+      Math.round(mAcc.n.kcal) + " kcal</span></div>";
+    mine.forEach(function (e) {
+      var en = entryNut(e);
+      h += '<div class="dx"><div class="dx-m"><div class="dx-n">' + esc(e.name) + "</div>" +
+        '<div class="dx-s">' + esc(entryAmount(e)) + " · " + (+en.n.protein.toFixed(1)) + " g protein</div></div>" +
+        '<span class="dx-k">' + Math.round(en.n.kcal) + "</span>" +
+        '<button class="x" data-act="unlog" data-id="' + e.id + '" aria-label="Remove">×</button></div>';
+    });
+    if (sug.length) {
+      h += '<div class="sugh">' + (mine.length ? "Also suggested" : "Suggested") + "</div>";
+      sug.forEach(function (e) {
+        var d = e.dish;
+        h += '<div class="dx sug"><div class="dx-m"><div class="dx-n">' + esc(d.name) + "</div>" +
+          '<div class="dx-s">' + esc(dishAmount(e)) + " · " + (+((d.n.protein || 0) * e.servings).toFixed(1)) +
+          ' g protein · <button class="lnk" style="padding:0" data-act="notAtMeal" data-key="' + esc(d.key) +
+          '" data-m="' + m + '">not at ' + esc(mealName(m).toLowerCase()) + '</button> · <button class="lnk" ' +
+          'style="padding:0" data-act="editDish" data-key="' + esc(d.key) + '">edit</button></div></div>' +
+          '<span class="dx-k">' + Math.round((d.n.kcal || 0) * e.servings) + "</span>" +
+          '<button class="btn sm" data-act="ateOne" data-key="' + esc(d.key) + '" data-sv="' +
+          e.servings.toFixed(4) + '" data-m="' + m + '">Ate</button></div>';
+      });
+    } else if (!mine.length) {
+      h += '<div class="hint" style="padding:6px 0">Nothing suggested — the cupboard has nothing for it, or the day is covered.</div>';
     }
-    var mk = 0, mp = 0;
-    row.forEach(function (e) {
-      mk += (e.dish.n.kcal || 0) * e.servings;
-      mp += (e.dish.n.protein || 0) * e.servings;
-    });
-    h += '<div class="card">';
-    row.forEach(function (e) {
-      var d = e.dish;
-      var svTxt = (+e.servings.toFixed(2)) + (e.servings === 1 ? " serving" : " servings");
-      var amount = d.kind === "item"
-        ? K.fmtQty(d.uses[d.id] * e.servings, byId(d.id) ? byId(d.id).unit : "pc") + " " +
-          (byId(d.id) ? K.UNIT_LABEL[byId(d.id).unit] : "") + " (" + svTxt + ")"
-        : svTxt;
-      h += '<div class="lo">' +
-        '<div class="lo-m"><div class="lo-n">' + esc(d.name) +
-        (d.kind === "recipe" ? ' <span class="tg-mini">recipe</span>' : "") + "</div>" +
-        '<div class="lo-s">' + esc(amount) + " · " +
-        Math.round((d.n.kcal || 0) * e.servings) + " kcal · " +
-        (+((d.n.protein || 0) * e.servings).toFixed(1)) + " g protein" +
-        (d.ownNut ? " · own profile" : "") + "</div>" +
-        '<div><button class="lnk" data-act="notAtMeal" data-key="' + esc(d.key) + '" data-m="' + m +
-        '">Not at ' + esc(mealName(m).toLowerCase()) + '</button> <button class="lnk" ' +
-        'data-act="editDish" data-key="' + esc(d.key) + '">Edit</button></div></div>' +
-        '<button class="btn sm" data-act="ateOne" data-key="' + esc(d.key) +
-        '" data-sv="' + e.servings.toFixed(4) + '">Ate it</button>' +
-        "</div>";
-    });
-    h += '<div class="gsub" style="margin-top:8px"><span>' + Math.round(mk) + " kcal</span>" +
-      "<span>" + (+mp.toFixed(1)) + " g protein</span></div>";
-    var mo = (r.mealOver && r.mealOver[m]) || {};
-    var moTxt = [];
-    if (mo.protein) moTxt.push("protein by " + (+mo.protein.toFixed(1)) + " g");
-    if (mo.gl) moTxt.push("glycaemic load by " + Math.round(mo.gl));
-    if (mo.kcal) moTxt.push("energy by " + Math.round(mo.kcal) + " kcal");
-    if (moTxt.length) {
-      h += '<div class="hint" style="margin-top:6px;color:var(--need)">Over your per-meal limit: ' +
-        esc(moTxt.join(", ")) + ". Soft limits, so it went over on purpose rather than " +
-        "spoiling the rest of the day.</div>";
+    // what a calorie counter will not tell you
+    var bits = [];
+    var gl = mAcc.giCarb / 100;
+    if (gl > 0.5) bits.push("glycaemic load " + Math.round(gl) + (Number((nut.perMeal || {}).gl) > 0 ? " / " + nut.perMeal.gl : ""));
+    if (mAcc.n.iron > 0.3) {
+      var lf = ironLift(mAcc.n);
+      bits.push("iron " + (+mAcc.n.iron.toFixed(1)) + " mg" + (Math.abs(lf - 1) > 0.05
+        ? " → ≈" + (+(mAcc.n.iron * lf).toFixed(1)) + " absorbed-equivalent (" + (lf > 1 ? "vitamin C helps" : "calcium blocks") + ")"
+        : ", no vitamin C with it"));
     }
-    (r.notes || []).forEach(function (nt) {
-      if (nt.meal !== m) return;
-      // "roughly 144% of it" is a strange thing to read. An effective amount
-      // is the number you would actually compare against a target.
-      var eff = nt.raw * nt.factor;
-      h += '<div class="hint" style="margin-top:6px">Iron here is ' +
-        (+nt.raw.toFixed(1)) + " mg, but with " + esc(nt.why) +
-        " you take up closer to <b>" + (+eff.toFixed(1)) + " mg</b>" +
-        (nt.factor < 1 ? " — less than it looks" : "") +
-        ". Rough guide, and not counted in the totals below.</div>";
-    });
-    h += '<div class="row" style="margin-top:10px"><button class="btn ghost" data-act="ateMeal" ' +
-      'data-m="' + m + '" style="flex:1">Ate all of ' + esc(mealName(m).toLowerCase()) +
-      "</button></div>";
-    if (row.length > 1 && row.some(function (e) { return e.dish.kind === "item"; })) {
+    if (bits.length) h += '<div class="ins">' + esc(bits.join(" · ")) + "</div>";
+    h += '<div class="row" style="margin-top:8px"><button class="btn ghost sm" data-act="addFood" data-m="' + m +
+      '" style="flex:1">+ Add food</button>' +
+      (sug.length > 1 ? '<button class="btn ghost sm" data-act="ateMeal" data-m="' + m + '" style="flex:1">Ate all suggested</button>' : "") +
+      "</div>";
+    if (sug.length > 1 && sug.some(function (e) { return e.dish.kind === "item"; })) {
       h += '<div style="text-align:center"><button class="lnk" data-act="saveMeal" data-m="' + m +
         '">Save this combination as a recipe</button></div>';
     }
     h += "</div>";
   }
 
-  // ---- shopping this day implies
-  if (r.buy.length) {
-    h += "<h2>Buy for today</h2><div class=\"card\">";
-    r.buy.forEach(function (b2) {
-      h += '<div class="kv"><span>' + esc(b2.item.name) + "</span><b class=\"num\">" +
-        K.fmtQty(b2.qty, b2.item.unit) + " " + K.UNIT_LABEL[b2.item.unit] +
-        " · " + K.kr(b2.cost) + "</b></div>";
+  // ---- use it before it goes
+  var soon = [];
+  S.items.forEach(function (it) {
+    (it.lots || []).forEach(function (L) {
+      var ex = K.effExp(L, it.openLife || 0);
+      if (ex !== null && ex - t <= 3 && L.qty > 1e-6) soon.push({ it: it, lot: L, d: ex - t });
     });
-    h += '<div class="hint" style="margin-top:8px">Priced at your budget prices, so this is ' +
-      "what the day costs at normal prices — an offer makes it cheaper, it does not make it " +
-      "a different day.</div></div>";
+  });
+  if (soon.length) {
+    var planned = {};
+    if (r.ok) (r.useStock || []).forEach(function (u) { planned[u.item.id] = u.qty; });
+    soon.sort(function (a, b) { return a.d - b.d; });
+    h += "<h2>Use it before it goes</h2><div class=\"card\">";
+    soon.forEach(function (x) {
+      var hasNut = !!(nut.foods[x.it.id] && nut.foods[x.it.id].n);
+      h += '<div class="kv"><span>' + esc(x.it.name) + " · " + K.fmtQty(x.lot.qty, x.it.unit) + " " +
+        K.UNIT_LABEL[x.it.unit] + " · " + (x.d <= 0 ? "today" : x.d === 1 ? "tomorrow" : x.d + " days") +
+        "</span><b>" + (planned[x.it.id] ? "in today's suggestions" : hasNut ? "not used today" : "no nutrition set") +
+        "</b></div>";
+    });
+    h += "</div>";
   }
 
-  // ---- targets, shortfalls first because that is the actionable part
-  h += "<h2>Against your targets</h2><div class=\"card\">";
-  if (r.missed.length) {
-    r.missed.forEach(function (x) {
-      var meta = nutMeta(x.key);
-      h += '<div class="kv"><span>' + esc(meta.label) + "</span>" +
-        '<b class="num" style="color:var(--need)">short ' + fmtNut(x.amount, meta) + " of " +
-        fmtNut(x.target, meta) + "</b></div>";
+  // ---- nutrients, the full table
+  var showN = EATVIEW === "eaten" ? eaten : addNut(addNut({ n: K.emptyNut(), giCarb: 0 }, eaten), plan);
+  h += "<h2>Nutrients</h2><div class=\"card\">" +
+    '<div class="seg"><button data-act="eatview" data-v="day" class="' + (EATVIEW === "day" ? "on" : "") +
+    '">Whole day as suggested</button><button data-act="eatview" data-v="eaten" class="' +
+    (EATVIEW === "eaten" ? "on" : "") + '">Eaten so far</button></div>';
+  var groups = [["macro", "Macros"], ["mineral", "Minerals"], ["vitamin", "Vitamins"]];
+  groups.forEach(function (g) {
+    h += '<div class="nb-h">' + g[1] + '</div><div class="nt"><span class="h"></span><span class="h n">Total</span>' +
+      '<span class="h n">Goal</span><span class="h n">Left</span>';
+    K.NUTRIENTS.forEach(function (nn) {
+      if (nn[3] !== g[0]) return;
+      var key = nn[0], meta = nutMeta(key), tot = showN.n[key] || 0, tt = tg[key] || {};
+      var mn = Number(tt.min) > 0 ? Number(tt.min) : 0, mx = Number(tt.max) > 0 ? Number(tt.max) : 0;
+      if (!mn && !mx && tot < 1e-6) return;
+      var goalTxt = mn ? fmtNum(mn) : mx ? "≤ " + fmtNum(mx) : "—";
+      var leftV = mn ? mn - tot : mx ? mx - tot : null, cls = "";
+      if (mn) cls = tot >= mn * 0.999 ? "ok2" : "lo2";
+      if (mx && tot > mx) cls = "ov2";
+      var label = meta.label;
+      if (key === "iron" && tot > 0) {
+        var ironEff = 0;
+        if (EATVIEW === "eaten") {
+          for (var m2 = 0; m2 < (Number(nut.meals) || 3); m2++) {
+            var acc2 = { n: K.emptyNut(), giCarb: 0 };
+            ents.filter(function (e) { return e.meal === m2; }).forEach(function (e) { addNut(acc2, entryNut(e)); });
+            ironEff += acc2.n.iron * ironLift(acc2.n);
+          }
+        } else {
+          for (var m3 = 0; m3 < (Number(nut.meals) || 3); m3++) {
+            var acc3 = { n: K.emptyNut(), giCarb: 0 };
+            ents.filter(function (e) { return e.meal === m3; }).forEach(function (e) { addNut(acc3, entryNut(e)); });
+            if (r.ok && r.plate[m3]) r.plate[m3].forEach(function (e) { addNut(acc3, planNut(e), e.servings); });
+            ironEff += acc3.n.iron * ironLift(acc3.n);
+          }
+        }
+        label += ' <span class="dx-s">≈' + fmtNum(ironEff) + " with pairing</span>";
+      }
+      h += "<span>" + label + ' <span class="dx-s">' + esc(meta.unit) + "</span></span>" +
+        '<span class="n">' + fmtNum(tot) + '</span><span class="n">' + goalTxt + "</span>" +
+        '<span class="n ' + cls + '">' + (leftV === null ? "" : (mn && leftV <= 0 ? "✓" : fmtNum(leftV))) + "</span>";
     });
-  }
-  (r.over || []).forEach(function (x) {
-    var meta2 = nutMeta(x.key);
-    h += '<div class="kv"><span>' + esc(meta2.label) + "</span>" +
-      '<b class="num" style="color:var(--need)">over by ' + fmtNut(x.amount, meta2) + "</b></div>";
+    h += "</div>";
   });
-  h += nutBars(r.totals, nutOf().targets);
+  var dayGL = showN.giCarb / 100;
+  h += '<div class="ins">Glycaemic load for the ' + (EATVIEW === "eaten" ? "day so far" : "whole day") + ": <b>" +
+    Math.round(dayGL) + "</b> (under 80 is low, over 120 high). Iron “with pairing” weighs each meal's " +
+    "iron by the vitamin C and calcium eaten with it — compare it with a target of about 16 mg if " +
+    "most of your iron is from plants and eggs.</div>";
+  if (r.ok && r.missed.length && EATVIEW === "day") {
+    h += '<div class="ins" style="color:var(--need)">Your cupboard cannot cover: ' +
+      esc(r.missed.slice(0, 6).map(function (x) {
+        var mt = nutMeta(x.key); return mt.label.toLowerCase() + " " + fmtNum(x.amount) + " " + mt.unit;
+      }).join(", ")) + ". Restocking is on the Today tab.</div>";
+  }
   h += '<div class="row" style="margin-top:12px">' +
-    '<button class="btn ghost" data-act="replan" style="flex:1">Plan again</button>' +
-    '<button class="btn ghost" data-act="openTargets" style="flex:1">Targets</button></div>';
-  h += "</div>";
+    '<button class="btn ghost" data-act="copyDay" style="flex:1">Ask Claude about today</button></div>' +
+    '<div class="row"><button class="btn ghost sm" data-act="openTargets" style="flex:1">Goals</button>' +
+    '<button class="btn ghost sm" data-act="openFoods" style="flex:1">Foods</button>' +
+    '<button class="btn ghost sm" data-act="openRecipes" style="flex:1">Recipes</button></div></div>';
 
   body.innerHTML = h;
+}
+
+function fmtNum(v) {
+  var a = Math.abs(v);
+  var s = a >= 100 ? String(Math.round(v)) : (a >= 10 ? v.toFixed(1) : v.toFixed(2));
+  return s.replace(/\.?0+$/, function (z) { return z.indexOf(".") >= 0 ? "" : z; }).replace(".", ",");
+}
+
+/* --------------------------------------------------- adding to the diary */
+var LOG = { m: 0, pick: null, q: "" };
+
+function openLog(m) {
+  LOG = { m: m, pick: null, q: "" };
+  $("#logBody").innerHTML = logHTML();
+  openSheet("#mLog");
+}
+
+function logHTML() {
+  var nut = nutOf(), h = "";
+  h += '<div class="tags" style="margin:0 0 10px">';
+  for (var m = 0; m < (Number(nut.meals) || 3); m++) {
+    h += '<button class="tg' + (m === LOG.m ? " on" : "") + '" data-act="logmeal" data-m="' + m + '">' +
+      esc(mealName(m)) + "</button>";
+  }
+  h += "</div>";
+  if (LOG.pick) {
+    var p = LOG.pick;
+    if (p.kind === "item") {
+      var it = byId(p.id), sc = stockInputScale(it.unit), f = nut.foods[it.id] || {};
+      var serv = Number(f.serving) > 0 ? Number(f.serving) : K.defaultServing(it.unit);
+      h += '<div class="hsub" style="margin:0 0 6px"><b>' + esc(it.name) + "</b> · " +
+        K.fmtQty(K.stockOf(it), it.unit) + " " + K.UNIT_LABEL[it.unit] + " in the cupboard</div>" +
+        '<div class="f"><label>Amount in ' + esc(sc.noun) + '</label><input type="number" min="0" step="any" ' +
+        'inputmode="decimal" id="logQty" value="' + (+(serv / sc.factor).toFixed(2)) + '"></div>' +
+        '<div class="tags" style="margin:-4px 0 10px">' + [0.5, 1, 1.5, 2].map(function (x) {
+          return '<button class="tg sm" data-act="logq" data-v="' + (+(serv * x / sc.factor).toFixed(2)) + '">' +
+            x + (x === 1 ? " serving" : " servings") + "</button>";
+        }).join("") + "</div>";
+    } else {
+      h += '<div class="hsub" style="margin:0 0 6px"><b>' + esc(p.name) + "</b></div>" +
+        '<div class="f"><label>Servings</label><input type="number" min="0" step="any" inputmode="decimal" ' +
+        'id="logQty" value="1"></div>';
+    }
+    h += '<div class="row"><button class="btn ghost" data-act="logback">Back</button>' +
+      '<button class="btn" data-act="logsave" style="flex:1">Add to ' + esc(mealName(LOG.m).toLowerCase()) + "</button></div>";
+    return h;
+  }
+  h += '<div class="f"><input type="search" id="logSearch" placeholder="Search your foods" value="' + esc(LOG.q) + '"></div>';
+  var q = LOG.q.trim().toLowerCase();
+  var list = [];
+  S.items.forEach(function (it) {
+    if (q && it.name.toLowerCase().indexOf(q) < 0) return;
+    var st = K.stockOf(it), f = nut.foods[it.id];
+    list.push({ kind: "item", id: it.id, name: it.name, st: st, sub: (st > 1e-6 ? K.fmtQty(st, it.unit) + " " +
+      K.UNIT_LABEL[it.unit] + " in stock" : "not in stock") + (f && f.n ? "" : " · no nutrition") });
+  });
+  (nut.recipes || []).forEach(function (r) {
+    if (q && (r.name || "").toLowerCase().indexOf(q) < 0) return;
+    list.push({ kind: "recipe", id: r.id, name: r.name || "Recipe", st: 1, sub: "recipe" });
+  });
+  list.sort(function (a, b) { return (b.st > 1e-6) - (a.st > 1e-6) || a.name.localeCompare(b.name); });
+  h += '<div class="card" style="padding-top:2px;padding-bottom:2px">';
+  list.forEach(function (x) {
+    h += '<div class="dx"><div class="dx-m"><div class="dx-n">' + esc(x.name) + '</div><div class="dx-s">' +
+      esc(x.sub) + '</div></div><button class="btn sm ghost" data-act="logpick" data-kind="' + x.kind +
+      '" data-id="' + esc(x.id) + '">Pick</button></div>';
+  });
+  if (!list.length) h += '<div class="hint" style="padding:10px 0">Nothing matches.</div>';
+  h += "</div>";
+  h += '<div class="nb-h">Something not from your cupboard</div>' +
+    '<div class="f"><input type="text" id="oName" placeholder="e.g. Shawarma at work"></div>' +
+    '<div class="f2"><div class="f"><label>kcal</label><input type="number" inputmode="decimal" id="oKcal"></div>' +
+    '<div class="f"><label>Protein g</label><input type="number" inputmode="decimal" id="oProt"></div></div>' +
+    '<div class="f2"><div class="f"><label>Carbs g</label><input type="number" inputmode="decimal" id="oCarb"></div>' +
+    '<div class="f"><label>Fat g</label><input type="number" inputmode="decimal" id="oFat"></div></div>' +
+    '<div class="row"><button class="btn ghost" data-act="logother" style="flex:1">Add to ' +
+    esc(mealName(LOG.m).toLowerCase()) + "</button></div>" +
+    '<div class="hint">Only what you type is counted. For a full breakdown, use “Ask Claude about today”.</div>';
+  return h;
+}
+
+function logSave() {
+  var p = LOG.pick, v = num(($("#logQty") || {}).value);
+  if (!p || !(v > 0)) { toast("Enter an amount."); return; }
+  var short;
+  if (p.kind === "item") {
+    var it = byId(p.id), sc = stockInputScale(it.unit), u = {};
+    u[it.id] = v * sc.factor;
+    short = logEntry(LOG.m, it.name, u, { key: "i:" + it.id });
+  } else {
+    var r = (nutOf().recipes || []).filter(function (x) { return x.id === p.id; })[0];
+    if (!r) return;
+    var sv = Number(r.serves) > 0 ? Number(r.serves) : 1, u2 = {};
+    (r.parts || []).forEach(function (pt) { u2[pt.itemId] = (u2[pt.itemId] || 0) + (Number(pt.qty) || 0) / sv * v; });
+    short = logEntry(LOG.m, r.name || "Recipe", u2, { recipeId: r.id, servings: v, key: "r:" + r.id });
+  }
+  save(); nutTouched(); closeSheets(); render();
+  toast(short.length ? "Added. The cupboard was short of " + short.join(", ") + "." : "Added to " + mealName(LOG.m).toLowerCase() + ".");
+}
+
+function logOther() {
+  var name = ($("#oName").value || "").trim();
+  var n = K.emptyNut();
+  n.kcal = num($("#oKcal").value) || 0; n.protein = num($("#oProt").value) || 0;
+  n.carb = num($("#oCarb").value) || 0; n.fat = num($("#oFat").value) || 0;
+  if (!name || !(n.kcal > 0 || n.protein > 0)) { toast("Name it and give at least the calories."); return; }
+  logEntry(LOG.m, name, {}, { n: n });
+  save(); nutTouched(); closeSheets(); render();
+  toast("Added to " + mealName(LOG.m).toLowerCase() + ".");
+}
+
+/* A plain-text day for a chat with Claude: what was eaten, what is suggested,
+   the totals against the goals. Enough for a real analysis, nothing private
+   beyond the food. */
+function dayText() {
+  var nut = nutOf(), t = K.today(), r = plateToday(), ents = entriesOn(t), lines = [];
+  lines.push("Please analyse my day of eating (Kurv food diary, " + K.isoFromDay(t) + "). " +
+    "Amounts are as bought (dry pasta, raw meat). Look at protein distribution, glycaemic load, " +
+    "iron with its absorption (pairings), micronutrient gaps, and what to change. Be specific.");
+  for (var m = 0; m < (Number(nut.meals) || 3); m++) {
+    var mine = ents.filter(function (e) { return e.meal === m; });
+    var sug = r.ok && r.plate[m] ? r.plate[m] : [];
+    if (!mine.length && !sug.length) continue;
+    lines.push("\n" + mealName(m) + ":");
+    mine.forEach(function (e) {
+      var en = entryNut(e);
+      lines.push("  ate " + e.name + " — " + entryAmount(e) + " (" + Math.round(en.n.kcal) + " kcal)");
+    });
+    sug.forEach(function (e) {
+      lines.push("  planned " + e.dish.name + " — " + dishAmount(e) + " (" + Math.round((e.dish.n.kcal || 0) * e.servings) + " kcal)");
+    });
+  }
+  var eaten = dayEaten(t), all = addNut(addNut({ n: K.emptyNut(), giCarb: 0 }, eaten), { n: K.emptyNut() });
+  if (r.ok) r.plate.forEach(function (row) { row.forEach(function (e) { addNut(all, planNut(e), e.servings); }); });
+  lines.push("\nTotals (eaten + planned) vs my goals:");
+  K.NUTRIENTS.forEach(function (nn) {
+    var tt = (nut.targets || {})[nn[0]] || {}, v = all.n[nn[0]] || 0;
+    if (!v && !tt.min && !tt.max) return;
+    lines.push("  " + nn[1] + ": " + fmtNum(v) + " " + nn[2] +
+      (tt.min ? " (goal ≥ " + tt.min + ")" : "") + (tt.max ? " (limit ≤ " + tt.max + ")" : ""));
+  });
+  lines.push("\nFoods and the products behind them:");
+  var seen = {};
+  ents.forEach(function (e) { (e.parts || []).forEach(function (p) { seen[p.itemId] = 1; }); });
+  if (r.ok) r.plate.forEach(function (row) { row.forEach(function (e) { for (var id in e.dish.uses) seen[id] = 1; }); });
+  Object.keys(seen).forEach(function (id) {
+    var it = byId(id), f = nut.foods[id] || {};
+    if (!it) return;
+    var prods = (it.watch || []).map(function (w) { return w.name; });
+    if (f.product) prods.unshift(f.product);
+    lines.push("  " + it.name + (prods.length ? " — " + prods.slice(0, 3).join("; ") : ""));
+  });
+  return lines.join("\n");
 }
 
 /** Short label and unit for a nutrient key. */
@@ -4144,53 +4555,31 @@ function byId(id) {
  * of what you just said you ate" is worth knowing, because the alternative is
  * a stock figure that drifts away from the shelf without ever saying why.
  */
-function eatDish(dishKey, servings) {
+function eatDish(dishKey, servings, m) {
   var r = plateToday();
   if (!r.ok) return;
   var dish = null;
   for (var i = 0; i < r.dishes.length; i++) if (r.dishes[i].key === dishKey) dish = r.dishes[i];
   if (!dish) { toast("That dish is no longer in the plan."); return; }
-
-  var t = K.today(), shortOf = [], ate = [];
-  for (var id in dish.uses) {
-    var it = byId(id);
-    if (!it) continue;
-    var want = dish.uses[id] * servings;
-    var got = K.consume(it, want, t);
-    if (got.took > 0) ate.push(it.name);
-    if (got.short > 1e-4) {
-      shortOf.push(K.fmtQty(got.short, it.unit) + " " + K.UNIT_LABEL[it.unit] + " " + it.name.toLowerCase());
-    }
-  }
-  nutOf().log.push({ ts: Date.now(), day: t, key: dishKey, name: dish.name, servings: servings });
-  if (nutOf().log.length > 600) nutOf().log = nutOf().log.slice(-600);
-
-  save();
-  nutTouched();
-  render();
-  toast(shortOf.length
-    ? "Logged, but the cupboard was short of " + shortOf.join(", ") + "."
-    : "Logged " + dish.name.toLowerCase() + ".");
+  var u = {};
+  for (var id in dish.uses) u[id] = dish.uses[id] * servings;
+  var short = logEntry(m, dish.name, u, { key: dishKey, servings: servings,
+    recipeId: dish.kind === "recipe" ? dish.id : null });
+  save(); nutTouched(); render();
+  toast(short.length ? "Logged, but the cupboard was short of " + short.join(", ") + "." : "Logged " + dish.name.toLowerCase() + ".");
 }
 
 function eatMeal(m) {
   var r = plateToday();
-  if (!r.ok || !r.plate[m] || !r.plate[m].length) { toast("Nothing in that meal."); return; }
-  var list = r.plate[m].slice();
-  var t = K.today(), shortAny = false;
+  if (!r.ok || !r.plate[m] || !r.plate[m].length) { toast("Nothing suggested there."); return; }
+  var list = r.plate[m].slice(), shortAny = false;
   list.forEach(function (e) {
-    for (var id in e.dish.uses) {
-      var it = byId(id);
-      if (!it) continue;
-      var got = K.consume(it, e.dish.uses[id] * e.servings, t);
-      if (got.short > 1e-4) shortAny = true;
-    }
-    nutOf().log.push({ ts: Date.now(), day: t, key: e.dish.key, name: e.dish.name, servings: e.servings });
+    var u = {};
+    for (var id in e.dish.uses) u[id] = e.dish.uses[id] * e.servings;
+    if (logEntry(m, e.dish.name, u, { key: e.dish.key, servings: e.servings,
+      recipeId: e.dish.kind === "recipe" ? e.dish.id : null }).length) shortAny = true;
   });
-  if (nutOf().log.length > 600) nutOf().log = nutOf().log.slice(-600);
-  save();
-  nutTouched();
-  render();
+  save(); nutTouched(); render();
   toast(shortAny ? "Logged — some of it was not in stock." : "Logged " + mealName(m).toLowerCase() + ".");
 }
 
@@ -4819,10 +5208,7 @@ function foodFormHTML(it, f) {
   var isPc = it.unit === "pc";
   var h = '<div class="hint" style="margin-bottom:10px">Quantities are in <b>' +
     K.UNIT_LABEL[it.unit] + "</b>, the unit this item is planned in. Enter the nutrition for " +
-    "whatever amount is easiest and say what that amount is — everything is scaled from it." +
-    "<br><br><b>Always for the food as it sits in your cupboard</b> — dry pasta, raw rice, " +
-    "uncooked oats — never cooked. Your stock is weighed that way, so cooked figures would " +
-    "make every amount roughly a third of what it really is.</div>";
+    "whatever amount is easiest and say what that amount is. As bought: dry, raw, uncooked.</div>";
 
   h += '<div class="f2">' +
     '<div class="f"><label>Figures are per</label>' +
@@ -6592,7 +6978,26 @@ document.addEventListener("click", function (e) {
     return;
   }
   if (act === "confirmAte") { confirmAte(); return; }
-  if (act === "ateOne") { eatDish(b.dataset.key, Number(b.dataset.sv) || 0); return; }
+  if (act === "ateOne") { eatDish(b.dataset.key, Number(b.dataset.sv) || 0, Number(b.dataset.m) || 0); return; }
+  if (act === "unlog") { unlog(b.dataset.id); save(); nutTouched(); render(); toast("Removed, and put back in the cupboard."); return; }
+  if (act === "addFood") { openLog(Number(b.dataset.m) || 0); return; }
+  if (act === "logmeal") { LOG.m = Number(b.dataset.m); $("#logBody").innerHTML = logHTML(); return; }
+  if (act === "logpick") { LOG.pick = { kind: b.dataset.kind, id: b.dataset.id,
+    name: b.dataset.kind === "recipe" ? ((nutOf().recipes || []).filter(function (x) { return x.id === b.dataset.id; })[0] || {}).name : "" };
+    $("#logBody").innerHTML = logHTML(); return; }
+  if (act === "logback") { LOG.pick = null; $("#logBody").innerHTML = logHTML(); return; }
+  if (act === "logq") { $("#logQty").value = b.dataset.v; return; }
+  if (act === "logsave") { logSave(); return; }
+  if (act === "logother") { logOther(); return; }
+  if (act === "eatview") { EATVIEW = b.dataset.v; render(); return; }
+  if (act === "copyDay") {
+    var dt = dayText();
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(dt).then(function () { toast("Copied. Paste it into a chat with Claude."); },
+        function () { toast("Could not copy."); });
+    } else toast("Could not copy.");
+    return;
+  }
   if (act === "ateMeal") { eatMeal(Number(b.dataset.m) || 0); return; }
   if (act === "replan") { plateToday(true); render(); toast("Planned again."); return; }
   if (act === "notAMeal") {
@@ -6895,6 +7300,13 @@ document.addEventListener("input", function (e) {
     return;
   }
   if (t.id === "claudeArea") { previewClaude(); return; }
+  if (t.id === "logSearch") {
+    LOG.q = t.value;
+    var pos = t.selectionStart;
+    $("#logBody").innerHTML = logHTML();
+    var ns = $("#logSearch"); if (ns) { ns.focus(); try { ns.setSelectionRange(pos, pos); } catch (e2) {} }
+    return;
+  }
   if (t.dataset && t.dataset.act === "foodset") {
     var fo = nutOf().foods[FOOD.id];
     if (fo) {

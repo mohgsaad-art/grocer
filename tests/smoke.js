@@ -91,7 +91,7 @@ setTimeout(() => {
   // ---- eat one dish and confirm stock actually moves
   if (nAte) {
     w.document.querySelector('[data-act="ateOne"]').click();
-    const logged = S.nut.log.length;
+    const logged = (S.nut.diary || []).length;
     const totalAfter = S.items.reduce((a,i)=>a+K.stockOf(i),0);
     console.log("  after one 'Ate it': log entries " + logged +
       ", total stock " + totalBefore.toFixed(3) + " -> " + totalAfter.toFixed(3) +
@@ -174,8 +174,8 @@ setTimeout(() => {
   console.log("  foods sheet rows: " + w.document.querySelectorAll('[data-act="openFood"]').length);
   click('[data-act="openFood"][data-id="eggs"]');
   const nutInputs = w.document.querySelectorAll('[data-act="foodnut"]').length;
-  console.log("  food editor: " + nutInputs + " nutrient fields, solo toggle " +
-    (w.document.querySelector('[data-act="foodsolo"]') ? "present" : "MISSING"));
+  console.log("  food editor: " + nutInputs + " nutrient fields, role chips " +
+    (w.document.querySelector('[data-act="foodrole"]') ? "present" : "MISSING"));
   click('[data-act="closeFood"]');
   click('[data-act="close"]');
   click('nav button[data-tab="plan"]');
