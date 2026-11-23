@@ -2351,6 +2351,8 @@ function load() {
       }
     }
   });
+  // Savings are derived, so bring them in line with today's budget prices.
+  recomputeAllSavings();
 }
 
 var saveTimer = null;
@@ -3153,6 +3155,7 @@ function applyPlanCSV() {
     }
   });
 
+  recomputeAllSavings();
   save(); closeSheets(); render();
   toast([added ? added + " added" : "", updated ? updated + " updated" : "",
          wiped ? wiped + " cleared" : ""].filter(Boolean).join(", ") + ".");
@@ -3391,9 +3394,15 @@ function renderMoney() {
         " · " + esc(r.product) + "</div></div>" +
         '<div class="rc-p"><div class="num">' + K.kr(r.total) + "</div>" +
         (r.saved > 0.5 ? '<div class="save num">−' + K.kr0(r.saved) + "</div>" : "") +
+        (r.saved < -0.5 ? '<div class="num" style="color:var(--gone);font-size:11px">+' +
+          K.kr0(-r.saved) + " over</div>" : "") +
+        '<button class="lnk" data-act="undoReceipt" data-ts="' + r.ts + '">Undo</button>' +
         "</div></div>";
     });
     h += "</div>";
+    h += '<div class="hint" style="margin-top:-2px">Logged something by mistake? <b>Undo</b> ' +
+      "takes it back out of spent and saved, and out of the cupboard — or off the waste count, " +
+      "if you had already binned it to correct it.</div>";
   } else {
     h += '<div class="empty">Purchases you log will show up here, and stay in the ' +
       "archive after you close the month.</div>";
@@ -3580,6 +3589,38 @@ function renderEat() {
       '<button class="btn ghost" data-act="openFoods" style="flex:1">Foods</button>' +
       '<button class="btn ghost" data-act="openTargets" style="flex:1">Targets</button></div></div>';
     return;
+  }
+
+  // ---- before anything else: is this a real day, and do the numbers agree?
+  var nutS = nutOf();
+  (nutS.recipes || []).forEach(function (rc) {
+    var mm2 = recipeMismatch(rc);
+    if (mm2) h += '<div class="warn" style="display:block">' + mismatchText(rc, mm2) + "</div>";
+  });
+
+  var tg = nutS.targets || {};
+  var kShort = r.missed.filter(function (x) { return x.key === "kcal"; })[0];
+  var pShort = r.missed.filter(function (x) { return x.key === "protein"; })[0];
+  var nMin = 0;
+  for (var kk0 in tg) if (tg[kk0] && tg[kk0].min > 0) nMin++;
+  if ((kShort && kShort.frac > 0.15) || (pShort && pShort.frac > 0.15) || r.missed.length > nMin / 2) {
+    var noNut = S.items.filter(function (i) { return !(nutS.foods || {})[i.id]; }).map(function (i) { return i.name; });
+    var solo = S.items.filter(function (i) {
+      var f = (nutS.foods || {})[i.id]; return f && f.soloOk === false;
+    }).length;
+    // Without this, a green bar for iron sits next to a day that is half a day,
+    // and reads as "iron is fine" when it means "this is everything you have".
+    h += '<div class="note" style="display:block"><b>This is not a full day.</b> With the foods ' +
+      "set up so far, the best possible is <b>" + Math.round(r.totals.kcal) + " kcal</b> and <b>" +
+      (+r.totals.protein.toFixed(0)) + " g protein</b>, and " + r.missed.length + " of " + nMin +
+      " targets fall short — it eats every serving its limits allow and still runs out. Any " +
+      "target that does show as met is met by that, so do not read much into it yet." +
+      (noNut.length ? "<br><br>No nutrition yet: <b>" + esc(noNut.join(", ")) + "</b>." : "") +
+      (solo ? "<br>" + solo + (solo === 1 ? " food is" : " foods are") + " set to only appear " +
+        "inside recipes, so they add nothing on their own." : "") +
+      '<div class="row" style="margin-top:8px"><button class="btn sm" data-act="openFoods" ' +
+      'style="flex:1">Foods</button><button class="btn sm ghost" data-act="openRecipes" ' +
+      'style="flex:1">Recipes</button></div></div>';
   }
 
   // ---- the day in one line of money, which is the trade-off being made
@@ -3944,6 +3985,12 @@ function targetsHTML() {
             weightOptions(tt.w) + "</select></div>" +
         "</div>" +
       "</div>";
+      if (key === "iron") {
+        h += '<div class="hint" style="margin:-2px 0 6px">9 mg assumes a mixed diet with some ' +
+          "meat. Iron from grains, pulses, greens and eggs is absorbed far less well, and with " +
+          "little or no meat the usual guidance is about <b>1.8\u00d7</b> — around 16 mg. The " +
+          "plan counts milligrams eaten, not absorbed, so set the floor for how you eat.</div>";
+      }
     }
   }
   return h;
@@ -4114,7 +4161,10 @@ function foodFormHTML(it, f) {
   var isPc = it.unit === "pc";
   var h = '<div class="hint" style="margin-bottom:10px">Quantities are in <b>' +
     K.UNIT_LABEL[it.unit] + "</b>, the unit this item is planned in. Enter the nutrition for " +
-    "whatever amount is easiest and say what that amount is — everything is scaled from it.</div>";
+    "whatever amount is easiest and say what that amount is — everything is scaled from it." +
+    "<br><br><b>Always for the food as it sits in your cupboard</b> — dry pasta, raw rice, " +
+    "uncooked oats — never cooked. Your stock is weighed that way, so cooked figures would " +
+    "make every amount roughly a third of what it really is.</div>";
 
   h += '<div class="f2">' +
     '<div class="f"><label>Figures are per</label>' +
@@ -4173,6 +4223,42 @@ function foodFormHTML(it, f) {
     }
   }
   return h;
+}
+
+/*
+ * A recipe with its own profile and the ingredient entries it is made of
+ * describe the same food twice, so they should roughly agree on energy —
+ * pairing effects move iron and GI, not calories. When they are off by half
+ * or more, one side is almost certainly for cooked food and the other for dry,
+ * which is exactly how pasta came out at 183 kcal one way and 410 the other.
+ */
+function recipeMismatch(r) {
+  if (!r || !r.ownNut || !r.n || !(Number(r.n.kcal) > 0)) return null;
+  var foods = nutOf().foods || {};
+  var serves = Number(r.serves) > 0 ? Number(r.serves) : 1;
+  var sum = 0, parts = [];
+  for (var i = 0; i < (r.parts || []).length; i++) {
+    var p = r.parts[i], f = foods[p.itemId], it = byId(p.itemId);
+    if (!f || !f.n || !it) return null;
+    var per = Number(f.per) > 0 ? Number(f.per) : K.defaultServing(it.unit);
+    var k = (Number(f.n.kcal) || 0) * (Number(p.qty) || 0) / per / serves;
+    sum += k;
+    parts.push({ name: it.name, unit: it.unit, per100: (Number(f.n.kcal) || 0) / per * 0.1 });
+  }
+  var own = Number(r.n.kcal);
+  if (!(sum > 0)) return null;
+  var ratio = Math.max(own, sum) / Math.min(own, sum);
+  return ratio > 1.5 ? { own: own, sum: sum, parts: parts } : null;
+}
+
+function mismatchText(r, mm) {
+  return "<b>" + esc(r.name || "This recipe") + "</b> says " + Math.round(mm.own) +
+    " kcal a serving, but its ingredients' own entries add up to " + Math.round(mm.sum) +
+    ". One side is almost certainly for <b>cooked</b> food while your stock is weighed " +
+    "<b>dry</b> or raw. Check " + mm.parts.map(function (p) {
+      return esc(p.name) + " (" + Math.round(p.per100) + " kcal per 100 " +
+        (p.unit === "L" ? "ml" : p.unit === "kg" ? "g" : "") + " as entered)";
+    }).join(", ") + " in Foods — dry pasta, rice and oats are around 350\u2013380.";
 }
 
 /* ---------------------------------------------------------------- recipes */
@@ -4273,6 +4359,8 @@ function recipeFormHTML(r) {
     "you can state the truth about the combination — a lower GI for rice with lemon, more " +
     "absorbable iron for greens with citrus.</div></div>";
 
+  var mm = recipeMismatch(r);
+  if (mm) h += '<div class="warn" style="display:block;margin-bottom:10px">' + mismatchText(r, mm) + "</div>";
   if (r.ownNut) {
     h += '<div class="row" style="margin:4px 0 10px">' +
       '<button class="btn ghost" data-act="aiRecipe" style="flex:1">Estimate with Gemini</button></div>' +
@@ -4361,11 +4449,16 @@ var GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/";
 
 function geminiModels() {
   var nut = nutOf();
-  var list = String(nut.models || "").split(/[\s,]+/)
-    .map(function (x) { return x.trim().replace(/^models\//, ""); }).filter(Boolean);
+  // Typed by hand on a phone, a name arrives as "Gemini 3.8 Flash". The API
+  // only knows gemini-3.8-flash, so lower-case it and hyphenate inner spaces;
+  // names are separated by commas, not spaces, for the same reason.
+  function norm(x) {
+    return String(x || "").trim().replace(/^models\//, "").toLowerCase().replace(/\s+/g, "-");
+  }
+  var list = String(nut.models || "").split(/[,;\n]+/).map(norm).filter(Boolean);
   // An install from before the chain had one model field; keep it at the front.
-  if (!list.length) list = (nut.model ? [nut.model] : []).concat(GEMINI_DEFAULT_MODELS);
-  if (nut.lastModel) list.unshift(nut.lastModel);
+  if (!list.length) list = (nut.model ? [norm(nut.model)] : []).concat(GEMINI_DEFAULT_MODELS);
+  if (nut.lastModel) list.unshift(norm(nut.lastModel));
   var seen = {}, out = [];
   list.forEach(function (m) {
     if (m && !seen[m] && !GEMINI_RETIRED.test(m)) { seen[m] = 1; out.push(m); }
@@ -4721,15 +4814,41 @@ function geminiDiscover(cb) {
     .catch(function (e) { cb(String(e.message || e)); });
 }
 
-function nutPrompt(what, amount) {
-  return "You are a food composition database. Give the nutrient content of: " + what +
+/*
+ * The question asked of Gemini. Three things went wrong with the plain version
+ * on real data, and each is now spelled out:
+ *
+ *  - Form. Asked about "pasta, 100 g" it answered for COOKED pasta (131 kcal),
+ *    while the cupboard holds dry pasta (about 360). Every amount in this app
+ *    is the food as it sits on the shelf, so that is what is asked for.
+ *  - Market. It gave American enriched-pasta iron and folate. Danish pasta,
+ *    flour and cereals are not fortified like that, so it is told so.
+ *  - Product. A plain name says nothing about fortification, which is the whole
+ *    difference between oat drinks. The products on the lookout list are named,
+ *    and it is asked to say what it assumed.
+ */
+function nutPrompt(what, amount, context) {
+  return "You are a food composition database for food sold in Denmark. Give the nutrient " +
+    "content of: " + what +
+    (context ? "\nProducts this refers to: " + context : "") +
     "\nFor exactly this amount: " + amount +
-    "\n\nReply with JSON only, no prose. Use these exact keys, all numbers in the unit given, " +
-    "0 if genuinely absent, and your best typical value if uncertain:\n" +
+    "\n\nRules:\n" +
+    "- The amount is the food AS BOUGHT and stored: dry pasta, rice and oats; raw meat and " +
+    "fish; the drink or sauce as poured from the pack. Never give cooked or prepared values " +
+    "unless the name itself says cooked.\n" +
+    "- Use Danish/EU products. Danish pasta, flour, bread and cereals are NOT fortified with " +
+    "iron, folic acid or B vitamins the way US products are; do not use US enriched values.\n" +
+    "- Fortification (calcium, vitamin D, B12, iodine in plant drinks, spreads, cereals): " +
+    "only include added nutrients if the named product is fortified. If you do not know, " +
+    "assume not fortified and say so in the note.\n" +
+    "- Carbohydrate excludes fibre, as on EU labels.\n\n" +
+    "Reply with JSON only, no prose. Use these exact keys, numbers in the unit given, 0 if " +
+    "genuinely absent:\n" +
     K.NUTRIENTS.map(function (n) { return '"' + n[0] + '" (' + n[2] + ")"; }).join(", ") +
-    '\nAlso include "gi" as the glycaemic index 0-100 (0 if the food has no meaningful ' +
-    "carbohydrate), and \"note\" as one short sentence on anything unusual or any assumption " +
-    "you made.\nReturn a flat JSON object with those keys and nothing else.";
+    '\nAlso include "gi" as the glycaemic index 0-100 (0 if no meaningful carbohydrate), ' +
+    '"form" as a few words naming the state you gave values for (e.g. "dry, uncooked"), ' +
+    'and "note" as one short sentence on any assumption, especially fortification.' +
+    "\nReturn a flat JSON object with those keys and nothing else.";
 }
 
 function applyAiNut(target, obj) {
@@ -4754,7 +4873,10 @@ function aiFood() {
     ? (Number(f.per) || 1) + " piece(s)"
     : K.fmtQty(Number(f.per) || 0.1, it.unit) + " " + K.UNIT_LABEL[it.unit] +
       " (" + Math.round((Number(f.per) || 0.1) * 1000) + " " + (it.unit === "kg" ? "g" : "ml") + ")";
-  geminiFetch(nutPrompt(it.name, amount), function (err, obj, info) {
+  var ctx = (it.watch || []).slice(0, 3).map(function (w) {
+    return w.name + " (" + storeLabel(w.store) + ")";
+  }).join("; ");
+  geminiFetch(nutPrompt(it.name, amount, ctx), function (err, obj, info) {
     if (btn) { btn.disabled = false; btn.textContent = "Fill in with Gemini"; }
     var note = $("#aiNote");
     if (err) {
@@ -4773,6 +4895,7 @@ function aiFood() {
           ? " (after " + info.tried.map(function (t) {
               return esc(t.model) + " " + esc(t.why);
             }).join(", ") + ")" : "") +
+        (obj.form ? ", for <b>" + esc(String(obj.form)).slice(0, 40) + "</b>" : "") +
         (obj.note ? " — " + esc(String(obj.note)).slice(0, 220) : "") +
         ". <b>Check them before trusting the plan</b>: these are a model's recollection of a " +
         "food table, not a measurement, and every number below is editable.</div>";
@@ -4794,8 +4917,9 @@ function aiRecipe() {
   var serves = Number(r.serves) > 0 ? Number(r.serves) : 1;
 
   var prompt = nutPrompt(
-    (r.name || "dish") + ", made from: " + parts,
-    "one serving (the whole dish serves " + serves + ")"
+    (r.name || "dish") + ", made from: " + parts +
+      " (amounts are as bought: dry pasta, rice and oats; raw meat)",
+    "one serving of the finished dish (the whole dish serves " + serves + ")"
   ) + "\n\nImportant: give the values for the COMBINATION as eaten, not the sum of the raw " +
     "ingredients. Where the ingredients interact, say so in the note and reflect it in the " +
     "numbers — acid lowering the glycaemic response of starch, vitamin C raising non-haem " +
@@ -5079,8 +5203,11 @@ function confirmBuy() {
   if (!p || !it) return;
   var t = K.today();
 
+  var lotIds = [];
   for (var i = 0; i < p.packs; i++) {
-    it.lots.push({ id: uid(), qty: p.offer.pack, exp: p.expDay, open: null,
+    var lid = uid();
+    lotIds.push(lid);
+    it.lots.push({ id: lid, qty: p.offer.pack, exp: p.expDay, open: null,
       bought: t, product: p.offer.name, paid: p.price });
   }
   it.spent = (it.spent || 0) + p.total;
@@ -5092,7 +5219,7 @@ function confirmBuy() {
     ts: Date.now(), day: t, itemId: it.id, item: it.name,
     store: p.offer.store, product: p.offer.name, packs: p.packs,
     packQty: p.offer.pack, unit: it.unit, qty: p.qty,
-    price: p.price, total: p.total, saved: p.saved,
+    price: p.price, total: p.total, saved: p.saved, lotIds: lotIds,
   });
   if (S.receipts.length > 400) S.receipts = S.receipts.slice(-400);
 
@@ -5186,7 +5313,8 @@ function confirmStock() {
   var p = SHEET.preview;
   if (!it || !p || !(p.qty > 0)) { toast("Enter an amount first."); return; }
   var t = K.today();
-  it.lots.push({ id: uid(), qty: p.qty, exp: p.expDay, open: null,
+  var newLot = uid();
+  it.lots.push({ id: newLot, qty: p.qty, exp: p.expDay, open: null,
     bought: t, product: "", paid: p.paid || 0 });
   it.asOf = t;
 
@@ -5200,7 +5328,7 @@ function confirmStock() {
       ts: Date.now(), day: t, itemId: it.id, item: it.name,
       store: "", product: "Added by hand", packs: 1,
       packQty: p.qty, unit: it.unit, qty: p.qty,
-      price: p.paid, total: p.paid, saved: p.saved || 0,
+      price: p.paid, total: p.paid, saved: p.saved || 0, lotIds: [newLot],
     });
     if (S.receipts.length > 400) S.receipts = S.receipts.slice(-400);
   }
@@ -5211,6 +5339,63 @@ function confirmStock() {
     ? "Added " + K.fmtQty(p.qty, it.unit) + " " + K.UNIT_LABEL[it.unit] + " · " + K.kr(p.paid)
     : "Added to " + it.name.toLowerCase() + ".");
   render();
+}
+
+/*
+ * Take a purchase back out, as if it was never logged. The × on a pack means
+ * "threw it out", which is right for food and wrong for a typo — correcting a
+ * 1,5 kg entry by binning it counted 1,5 kg of waste AND kept the money in
+ * spent. This reverses all of it: the money, the quantity, and either the packs
+ * still in the cupboard or the waste they were binned into.
+ */
+function undoReceipt(ts) {
+  var idx = -1;
+  for (var i = 0; i < S.receipts.length; i++) if (S.receipts[i].ts === ts) { idx = i; break; }
+  if (idx < 0) return;
+  var r = S.receipts[idx];
+  var it = byId(r.itemId);
+  var what = (it ? it.name : r.item) + ", " + K.fmtQty(r.qty, r.unit) + " " +
+    K.UNIT_LABEL[r.unit] + " for " + K.kr(r.total);
+  if (!confirm("Undo " + what + "?\n\nIt comes off this month's spending.")) return;
+
+  S.receipts.splice(idx, 1);
+  var note = "";
+  if (it) {
+    it.spent = Math.max(0, (it.spent || 0) - (Number(r.total) || 0));
+    it.boughtQty = Math.max(0, (it.boughtQty || 0) - (Number(r.qty) || 0));
+    var ids = {};
+    (r.lotIds || []).forEach(function (x) { ids[x] = true; });
+    var inStock = 0, unbinned = 0;
+    it.lots = it.lots.filter(function (l) {
+      if (ids[l.id]) { inStock += l.qty; return false; }
+      return true;
+    });
+    it.binned = (it.binned || []).filter(function (bn) {
+      if (ids[bn.id]) { unbinned += bn.qty; return false; }
+      return true;
+    });
+    if (unbinned > 0) it.wasted = Math.max(0, (it.wasted || 0) - unbinned);
+
+    // Entries from before receipts remembered their packs cannot be traced, so
+    // ask — the common case is exactly this one: binned to correct a mistake.
+    if (!r.lotIds && (it.wasted || 0) >= (Number(r.qty) || 0) - 1e-6 && r.qty > 0 &&
+        confirm("Did you bin these " + K.fmtQty(r.qty, r.unit) + " " + K.UNIT_LABEL[r.unit] +
+          " to correct the mistake?\n\nOK takes them off this month's waste too.")) {
+      it.wasted = Math.max(0, it.wasted - r.qty);
+      unbinned = r.qty;
+    }
+    if (!r.lotIds && !unbinned) {
+      note = " The packs are not linked to it, so check the Stock tab.";
+    } else if (inStock > 0) {
+      note = " " + K.fmtQty(inStock, it.unit) + " " + K.UNIT_LABEL[it.unit] + " taken out of stock.";
+    } else if (unbinned > 0) {
+      note = " Taken back off the waste count.";
+    }
+    recomputeSavings(it);
+  }
+  save();
+  render();
+  toast("Undone." + note);
 }
 
 /* --------------------------------------------------------------- item sheet */
@@ -5352,10 +5537,30 @@ function confirmItem() {
     it.coverDays = isFinite(cover) && cover > 0 ? cover : null;
     setBudget(it, bud);
   }
+  recomputeSavings(it);
   save();
   closeSheets();
   render();
 }
+
+/*
+ * This month's savings, recomputed from the receipts against the budget price
+ * as it stands now. A saving is "under your rail", and the rail is the month's,
+ * so a purchase logged before you set the price — or before you changed it —
+ * is measured the same way as one logged after. Without this, everything bought
+ * before the price field existed showed 0 kr saved however cheap it was.
+ * Archived months keep the figures they were closed with.
+ */
+function recomputeSavings(it) {
+  var bu = K.budgetUnitOf(it), total = 0;
+  S.receipts.forEach(function (r) {
+    if (r.itemId !== it.id) return;
+    r.saved = bu === null ? 0 : Math.round((bu * (Number(r.qty) || 0) - (Number(r.total) || 0)) * 100) / 100;
+    total += r.saved;
+  });
+  it.saved = Math.round(total * 100) / 100;
+}
+function recomputeAllSavings() { S.items.forEach(recomputeSavings); }
 
 /* Always written, never left undefined, so the one-off migration that seeds a
  * price from the lookout list can never overwrite a choice — including the
@@ -5600,7 +5805,14 @@ document.addEventListener("click", function (e) {
     var kill = {};
     String(b.dataset.lot).split(",").forEach(function (x) { kill[x] = true; });
     var gone = 0;
-    it3.lots.forEach(function (l) { if (kill[l.id]) gone += Math.max(0, l.qty); });
+    it3.lots.forEach(function (l) {
+      if (!kill[l.id]) return;
+      gone += Math.max(0, l.qty);
+      if (binned) {
+        it3.binned = it3.binned || [];
+        it3.binned.push({ id: l.id, qty: Math.max(0, l.qty), day: K.today() });
+      }
+    });
     it3.lots = it3.lots.filter(function (l) { return !kill[l.id]; });
     if (binned) it3.wasted = (it3.wasted || 0) + gone;
     save(); render();
@@ -5643,6 +5855,7 @@ document.addEventListener("click", function (e) {
     budgetHint();
     return;
   }
+  if (act === "undoReceipt") { undoReceipt(Number(b.dataset.ts)); return; }
   if (act === "newItem") { openItem(null); return; }
   if (act === "editItem") { openItem(id); return; }
   if (act === "confirmItem") { confirmItem(); return; }
@@ -6049,7 +6262,8 @@ window.Kurv_app = { S: function () { return S; }, CAT: CAT, render: render,
   search: search, viewOf: viewOf, load: load,
   nutTouched: nutTouched, plateToday: plateToday,
   geminiFetch: geminiFetch, geminiModels: geminiModels, geminiDiscover: geminiDiscover,
-  cleanKey: cleanKey, keyShapeWarning: keyShapeWarning, flushSave: flushSave };
+  cleanKey: cleanKey, keyShapeWarning: keyShapeWarning, flushSave: flushSave,
+  nutPrompt: nutPrompt, recipeMismatch: recipeMismatch };
 })();
 </script>
 </body>
