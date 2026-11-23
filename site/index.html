@@ -2263,7 +2263,9 @@ var DEFAULTS = {
     recipes: [],
     log: [],
     key: "",
-    model: "gemini-2.5-flash",
+    model: "",
+    models: "",        // comma-separated; empty means the built-in chain
+    lastModel: "",
     recipePref: 1.5,
     dayBudget: 0,
     stamp: 0,
@@ -3970,7 +3972,7 @@ function foodsHTML() {
     "do the typing — you review every figure before it is kept.</div>";
 
   if (!S.items.length) {
-    return h + '<div class="hint">Add something to your plan first.</div>';
+    h += '<div class="hint">Add something to your plan first.</div>';
   }
 
   S.items.forEach(function (it) {
@@ -3993,10 +3995,15 @@ function foodsHTML() {
     '<div class="hint">Stays in this browser and is deliberately left out of the backup file, ' +
     "so exporting your data never carries the key with it. It is sent straight from your phone " +
     "to Google, never through anything of mine. Use a restricted key with a low quota.</div></div>";
-  h += '<div class="f"><label>Model</label>' +
-    '<input type="text" value="' + esc(nut.model || "gemini-2.5-flash") +
-    '" data-act="geminiset" data-f="model" spellcheck="false">' +
-    '<div class="hint">If the name is wrong the error says so and you can change it here.</div></div>';
+  h += '<div class="f"><label>Models to try, in order</label>' +
+    '<input type="text" id="gemModels" value="' + esc(geminiModels().join(", ")) +
+    '" data-act="geminiset" data-f="models" spellcheck="false" autocapitalize="off">' +
+    '<div class="row" style="margin-top:6px"><button class="btn ghost sm" data-act="findModels" ' +
+    'style="flex:1" id="findModelsBtn">Find the models my key can use</button></div>' +
+    '<div class="hint">If one is rate-limited, overloaded, missing or answers with junk, the ' +
+    "next is tried on its own. Free quotas are counted per model, so a longer list keeps " +
+    "working when one runs dry. Whichever answered last goes first next time" +
+    (nut.lastModel ? " — currently <b>" + esc(nut.lastModel) + "</b>" : "") + ".</div></div>";
   return h;
 }
 
@@ -4240,17 +4247,67 @@ function recipeFormHTML(r) {
  *
  * Nothing is written until you have looked at it.
  */
-function geminiFetch(prompt, cb) {
-  var nut = nutOf();
-  var key = (nut.key || "").trim();
-  if (!key) { cb("No API key — paste one in Foods."); return; }
-  var model = (nut.model || "gemini-2.5-flash").trim();
-  var url = "https://generativelanguage.googleapis.com/v1beta/models/" +
-    encodeURIComponent(model) + ":generateContent?key=" + encodeURIComponent(key);
+/*
+ * Gemini, with a fallback chain.
+ *
+ * Free-tier quotas are counted per model, and individual models go missing,
+ * get renamed, or sit at "overloaded" for an afternoon. So one model is a
+ * single point of failure that fails often. The call walks a list instead and
+ * takes the first good answer:
+ *
+ *   moves on    rate limit or quota (429), overloaded or server error (5xx),
+ *               model unknown or not open to this key (404, model-level 403),
+ *               no reply in time, a safety block, or a reply that is not JSON
+ *   stops       the key itself is bad — every model would refuse it, so trying
+ *               the rest just burns time and prints the same error five times
+ *
+ * The model that last answered goes to the front next time, so a key that only
+ * has quota on one model does not pay for four failures on every lookup. If a
+ * whole pass fails only on transient things (busy, rate limited, timeout), it
+ * waits a moment and goes round once more before giving up.
+ */
+var GEMINI_DEFAULT_MODELS = [
+  "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash",
+  "gemini-2.0-flash-lite", "gemini-2.5-pro",
+];
+var GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/";
 
-  fetch(url, {
+function geminiModels() {
+  var nut = nutOf();
+  var list = String(nut.models || "").split(/[\s,]+/)
+    .map(function (x) { return x.trim().replace(/^models\//, ""); }).filter(Boolean);
+  // An install from before the chain had one model field; keep it at the front.
+  if (!list.length) list = (nut.model ? [nut.model] : []).concat(GEMINI_DEFAULT_MODELS);
+  if (nut.lastModel) list.unshift(nut.lastModel);
+  var seen = {}, out = [];
+  list.forEach(function (m) { if (m && !seen[m]) { seen[m] = 1; out.push(m); } });
+  return out;
+}
+
+/** Turn one failed attempt into a short reason and a decision. */
+function geminiClassify(status, msg) {
+  var m = String(msg || "");
+  if (status === 401 || /api[ _-]?key not valid|API_KEY_INVALID|api key expired|API key was reported/i.test(m)) {
+    return { fatal: true, why: "the API key was refused" };
+  }
+  if (status === 429) return { transient: true, why: "rate limited or out of quota" };
+  if (status === 503 || status === 502 || status === 504) return { transient: true, why: "overloaded" };
+  if (status >= 500) return { transient: true, why: "server error" };
+  if (status === 404) return { why: "not available to this key" };
+  if (status === 403) return { why: "not permitted for this key" };
+  if (status === 400) return { why: "rejected the request" };
+  return { transient: true, why: m || "failed" };
+}
+
+function geminiOnce(model, key, prompt, timeoutMs) {
+  var ctl = typeof AbortController !== "undefined" ? new AbortController() : null;
+  var timer = null;
+  var url = GEMINI_BASE + "models/" + encodeURIComponent(model) +
+    ":generateContent?key=" + encodeURIComponent(key);
+  var req = fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
+    signal: ctl ? ctl.signal : undefined,
     body: JSON.stringify({
       contents: [{ parts: [{ text: prompt }] }],
       generationConfig: { temperature: 0, responseMimeType: "application/json" },
@@ -4261,28 +4318,166 @@ function geminiFetch(prompt, cb) {
         var msg = "HTTP " + res.status;
         try { var j = JSON.parse(txt); if (j.error && j.error.message) msg = j.error.message; }
         catch (e) {}
-        throw new Error(msg);
+        var c = geminiClassify(res.status, msg);
+        throw { model: model, status: res.status, msg: msg, why: c.why,
+                fatal: !!c.fatal, transient: !!c.transient };
       }
-      return txt;
+      var data;
+      try { data = JSON.parse(txt); }
+      catch (e) { throw { model: model, why: "garbled reply", transient: true }; }
+      var cand = data && data.candidates && data.candidates[0];
+      if (!cand && data && data.promptFeedback && data.promptFeedback.blockReason) {
+        throw { model: model, why: "blocked (" + data.promptFeedback.blockReason + ")" };
+      }
+      var part = cand && cand.content && cand.content.parts && cand.content.parts[0];
+      if (!part || !part.text) {
+        throw { model: model, why: cand && cand.finishReason && cand.finishReason !== "STOP"
+          ? "stopped early (" + cand.finishReason + ")" : "empty reply" };
+      }
+      var obj;
+      try { obj = JSON.parse(part.text); }
+      catch (e) {
+        // Occasionally it wraps the JSON in prose or a fence; take the braces.
+        var a = part.text.indexOf("{"), b = part.text.lastIndexOf("}");
+        try { obj = a >= 0 && b > a ? JSON.parse(part.text.slice(a, b + 1)) : null; }
+        catch (e2) { obj = null; }
+      }
+      if (!obj || typeof obj !== "object") throw { model: model, why: "reply was not JSON" };
+      return obj;
     });
-  }).then(function (txt) {
-    var data = JSON.parse(txt);
-    var part = data && data.candidates && data.candidates[0] &&
-      data.candidates[0].content && data.candidates[0].content.parts &&
-      data.candidates[0].content.parts[0];
-    if (!part || !part.text) throw new Error("Empty reply.");
-    var obj;
-    try { obj = JSON.parse(part.text); }
-    catch (e) {
-      // Occasionally it wraps the JSON in prose or a fence; take the braces.
-      var a = part.text.indexOf("{"), b = part.text.lastIndexOf("}");
-      if (a < 0 || b <= a) throw new Error("Reply was not JSON.");
-      obj = JSON.parse(part.text.slice(a, b + 1));
-    }
-    cb(null, obj);
-  }).catch(function (e) {
-    cb(String(e.message || e));
+  }, function (e) {
+    var aborted = e && e.name === "AbortError";
+    throw { model: model, why: aborted ? "no reply in " + Math.round(timeoutMs / 1000) + " s"
+      : "could not reach Google", transient: true };
   });
+  var watchdog = new Promise(function (_, reject) {
+    timer = setTimeout(function () {
+      if (ctl) ctl.abort();
+      reject({ model: model, why: "no reply in " + Math.round(timeoutMs / 1000) + " s", transient: true });
+    }, timeoutMs);
+  });
+  return Promise.race([req, watchdog]).then(function (v) { clearTimeout(timer); return v; },
+    function (e) { clearTimeout(timer); throw e; });
+}
+
+/**
+ * geminiFetch(prompt, cb, onStatus)
+ *   cb(err, obj, info)   info = { model, tried: [{ model, why }] }
+ *   onStatus(text)       optional, for "Trying gemini-2.0-flash…"
+ */
+function geminiFetch(prompt, cb, onStatus) {
+  var nut = nutOf();
+  var key = (nut.key || "").trim();
+  if (!key) { cb("No API key — paste one in Foods."); return; }
+  var models = geminiModels();
+  var timeoutMs = Number(nut.timeoutMs) > 0 ? Number(nut.timeoutMs) : 25000;
+  var tried = [];
+  var round = 0;
+  var discovered = false;
+  var allMissing = true;
+
+  function pass(i, allTransient) {
+    if (i >= models.length) {
+      // Every name came back "not found": Google has retired or renamed them.
+      // Rather than fail, ask which models this key can use, keep that list,
+      // and go round once more with it. This is what keeps the feature alive
+      // when the built-in names go stale.
+      if (allMissing && !discovered && models.length) {
+        discovered = true;
+        if (onStatus) onStatus("Those models are gone — looking up current ones…");
+        geminiDiscover(function (err, names) {
+          if (err || !names || !names.length) {
+            cb("None of the listed models exist any more, and listing current ones failed (" +
+              (err || "nothing returned") + ").", null, { tried: tried });
+            return;
+          }
+          nut.models = names.join(", ");
+          nut.lastModel = "";
+          save();
+          models = names;
+          allMissing = false;
+          pass(0, true);
+        });
+        return;
+      }
+      if (round === 0 && allTransient && models.length) {
+        round = 1;
+        if (onStatus) onStatus("Everything was busy — trying again…");
+        setTimeout(function () { pass(0, true); }, 1500);
+        return;
+      }
+      // One line per model, with its latest reason — a second round repeating
+      // "overloaded" for every name is noise, not information.
+      var last = {}, order = [];
+      tried.forEach(function (t) { if (!(t.model in last)) order.push(t.model); last[t.model] = t.why; });
+      cb("No model answered" + (round ? " after two rounds" : "") + ". " + order.map(function (m) {
+        return m + ": " + last[m];
+      }).join("; ") + ".", null, { tried: tried });
+      return;
+    }
+    var model = models[i];
+    if (onStatus) onStatus("Asking " + model + "…");
+    geminiOnce(model, key, prompt, timeoutMs).then(function (obj) {
+      if (nut.lastModel !== model) { nut.lastModel = model; save(); }
+      cb(null, obj, { model: model, tried: tried });
+    }, function (f) {
+      f = f || {};
+      tried.push({ model: model, why: f.why || "failed" });
+      if (f.fatal) {
+        cb("Gemini refused the key (" + (f.msg || f.why) + "). Check it under Plan → Foods.",
+          null, { tried: tried });
+        return;
+      }
+      // Never keep favouring a model that has stopped answering.
+      if (nut.lastModel === model) { nut.lastModel = ""; save(); }
+      if (f.status !== 404) allMissing = false;
+      pass(i + 1, allTransient && !!f.transient);
+    });
+  }
+  pass(0, true);
+}
+
+/**
+ * Ask Google which models this key can actually call, and fill the list with
+ * the text ones in a sensible order: flash first (fast, biggest free quota),
+ * then flash-lite, then pro; newest version first within each; previews and
+ * experiments last because they are the ones that vanish.
+ */
+function geminiDiscover(cb) {
+  var key = (nutOf().key || "").trim();
+  if (!key) { cb("Paste a key first."); return; }
+  fetch(GEMINI_BASE + "models?pageSize=200&key=" + encodeURIComponent(key))
+    .then(function (res) {
+      return res.text().then(function (txt) {
+        var j = null;
+        try { j = JSON.parse(txt); } catch (e) {}
+        if (!res.ok) throw new Error((j && j.error && j.error.message) || "HTTP " + res.status);
+        return j || {};
+      });
+    })
+    .then(function (j) {
+      var names = (j.models || []).filter(function (m) {
+        return (m.supportedGenerationMethods || []).indexOf("generateContent") >= 0;
+      }).map(function (m) { return String(m.name || "").replace(/^models\//, ""); })
+        .filter(function (n) {
+          return /^gemini-/.test(n) &&
+            !/embed|aqa|tts|image|audio|live|vision|thinking-exp|learnlm|computer|robotics/i.test(n);
+        });
+      function rank(n) {
+        var tier = /flash-lite/.test(n) ? 1 : /flash/.test(n) ? 0 : /pro/.test(n) ? 2 : 3;
+        var ver = Number((n.match(/gemini-(\d+(?:\.\d+)?)/) || [])[1]) || 0;
+        var flaky = /preview|exp|\d{2}-\d{2}$|-\d{3}$/.test(n) ? 1 : 0;
+        return [flaky, tier, -ver, n.length];
+      }
+      names.sort(function (a, b) {
+        var ra = rank(a), rb = rank(b);
+        for (var i = 0; i < ra.length; i++) if (ra[i] !== rb[i]) return ra[i] - rb[i];
+        return a < b ? -1 : 1;
+      });
+      if (!names.length) throw new Error("This key lists no text models.");
+      cb(null, names.slice(0, 8));
+    })
+    .catch(function (e) { cb(String(e.message || e)); });
 }
 
 function nutPrompt(what, amount) {
@@ -4318,7 +4513,7 @@ function aiFood() {
     ? (Number(f.per) || 1) + " piece(s)"
     : K.fmtQty(Number(f.per) || 0.1, it.unit) + " " + K.UNIT_LABEL[it.unit] +
       " (" + Math.round((Number(f.per) || 0.1) * 1000) + " " + (it.unit === "kg" ? "g" : "ml") + ")";
-  geminiFetch(nutPrompt(it.name, amount), function (err, obj) {
+  geminiFetch(nutPrompt(it.name, amount), function (err, obj, info) {
     if (btn) { btn.disabled = false; btn.textContent = "Fill in with Gemini"; }
     var note = $("#aiNote");
     if (err) {
@@ -4332,10 +4527,18 @@ function aiFood() {
     var n2 = $("#aiNote");
     if (n2) {
       n2.innerHTML = '<div class="hint">Filled in ' + n + " values" +
+        (info && info.model ? " using <b>" + esc(info.model) + "</b>" : "") +
+        (info && info.tried && info.tried.length
+          ? " (after " + info.tried.map(function (t) {
+              return esc(t.model) + " " + esc(t.why);
+            }).join(", ") + ")" : "") +
         (obj.note ? " — " + esc(String(obj.note)).slice(0, 220) : "") +
         ". <b>Check them before trusting the plan</b>: these are a model's recollection of a " +
         "food table, not a measurement, and every number below is editable.</div>";
     }
+  }, function (msg) {
+    var bb = $("#aiBtn");
+    if (bb) bb.textContent = msg;
   });
 }
 
@@ -4359,12 +4562,13 @@ function aiRecipe() {
 
   var note = $("#aiNote");
   if (note) note.innerHTML = '<div class="hint">Asking Gemini…</div>';
-  geminiFetch(prompt, function (err, obj) {
+  geminiFetch(prompt, function (err, obj, info) {
     if (err) {
       if (note) note.innerHTML = '<div class="hint" style="color:var(--gone)">Gemini: ' +
         esc(err) + "</div>";
       return;
     }
+    RCP.lastModel = info && info.model;
     applyAiNut(r, obj);
     r.ownNut = true;
     save(); nutTouched();
@@ -4372,9 +4576,13 @@ function aiRecipe() {
     var n2 = $("#aiNote");
     if (n2) {
       n2.innerHTML = '<div class="hint">Estimated for the dish as eaten' +
+        (RCP.lastModel ? " by <b>" + esc(RCP.lastModel) + "</b>" : "") +
         (obj.note ? " — " + esc(String(obj.note)).slice(0, 260) : "") +
         ". Check it: a pairing effect is an estimate on top of an estimate.</div>";
     }
+  }, function (msg) {
+    var nn = $("#aiNote");
+    if (nn) nn.innerHTML = '<div class="hint">' + esc(msg) + "</div>";
   });
 }
 
@@ -5182,6 +5390,21 @@ document.addEventListener("click", function (e) {
     return;
   }
   if (act === "aiFood") { aiFood(); return; }
+  if (act === "findModels") {
+    var fb = $("#findModelsBtn");
+    if (fb) { fb.disabled = true; fb.textContent = "Asking Google…"; }
+    geminiDiscover(function (err, names) {
+      if (fb) { fb.disabled = false; fb.textContent = "Find the models my key can use"; }
+      if (err) { toast("Could not list models: " + err); return; }
+      nutOf().models = names.join(", ");
+      nutOf().lastModel = "";
+      save();
+      var gm = $("#gemModels");
+      if (gm) gm.value = names.join(", ");
+      toast(names.length + " models found. " + names[0] + " goes first.");
+    });
+    return;
+  }
   if (act === "aiRecipe") { aiRecipe(); return; }
 
   // ---- recipes
@@ -5344,6 +5567,9 @@ document.addEventListener("input", function (e) {
   }
   if (t.dataset && t.dataset.act === "geminiset") {
     nutOf()[t.dataset.f] = t.value.trim();
+    // Reordering the list by hand is a statement of preference; do not let the
+    // remembered last-good model quietly jump back in front of it.
+    if (t.dataset.f === "models") nutOf().lastModel = "";
     save();
     return;
   }
@@ -5452,7 +5678,8 @@ document.addEventListener("visibilitychange", function () {
 
 window.Kurv_app = { S: function () { return S; }, CAT: CAT, render: render,
   search: search, viewOf: viewOf, load: load,
-  nutTouched: nutTouched, plateToday: plateToday };
+  nutTouched: nutTouched, plateToday: plateToday,
+  geminiFetch: geminiFetch, geminiModels: geminiModels, geminiDiscover: geminiDiscover };
 })();
 </script>
 </body>
