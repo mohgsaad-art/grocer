@@ -3,7 +3,7 @@
   "private": true,
   "description": "Tests for the single-file app in site/. Nothing here is deployed.",
   "scripts": {
-    "test": "node tests/lptest.js && node tests/dietest.js && node tests/smoke.js && node tests/migrate.js && node tests/gemini.js"
+    "test": "node tests/lptest.js && node tests/dietest.js && node tests/smoke.js && node tests/migrate.js && node tests/gemini.js && node tests/keyerrors.js"
   },
   "devDependencies": {
     "jsdom": "^26.0.0"

@@ -3991,15 +3991,19 @@ function foodsHTML() {
 
   h += '<div class="f" style="margin-top:14px"><label>Gemini API key</label>' +
     '<input type="password" value="' + esc(nut.key || "") + '" data-act="geminiset" data-f="key" ' +
-    'placeholder="paste to enable auto-fill" autocomplete="off" spellcheck="false">' +
-    '<div class="hint">Stays in this browser and is deliberately left out of the backup file, ' +
-    "so exporting your data never carries the key with it. It is sent straight from your phone " +
-    "to Google, never through anything of mine. Use a restricted key with a low quota.</div></div>";
+    'placeholder="paste to enable auto-fill" autocomplete="off" autocorrect="off" ' +
+    'autocapitalize="off" spellcheck="false">' +
+    '<div class="row" style="margin-top:6px"><button class="btn ghost sm" data-act="findModels" ' +
+    'style="flex:1" id="findModelsBtn">Check key and find models</button></div>' +
+    '<div id="keyStatus"></div>' +
+    '<div class="hint">Make it at <b>aistudio.google.com/apikey</b> — a key from there has the ' +
+    "Gemini API switched on already. If you restrict it, restrict by <b>Websites</b> and add " +
+    "<b>" + esc(GEMINI_SITE) + "</b> with the /* on the end; any other kind of restriction " +
+    "blocks a web page. It stays in this browser, is left out of the backup file, and goes " +
+    "straight from your phone to Google.</div></div>";
   h += '<div class="f"><label>Models to try, in order</label>' +
     '<input type="text" id="gemModels" value="' + esc(geminiModels().join(", ")) +
     '" data-act="geminiset" data-f="models" spellcheck="false" autocapitalize="off">' +
-    '<div class="row" style="margin-top:6px"><button class="btn ghost sm" data-act="findModels" ' +
-    'style="flex:1" id="findModelsBtn">Find the models my key can use</button></div>' +
     '<div class="hint">If one is rate-limited, overloaded, missing or answers with junk, the ' +
     "next is tried on its own. Free quotas are counted per model, so a longer list keeps " +
     "working when one runs dry. Whichever answered last goes first next time" +
@@ -4284,19 +4288,93 @@ function geminiModels() {
   return out;
 }
 
-/** Turn one failed attempt into a short reason and a decision. */
-function geminiClassify(status, msg) {
-  var m = String(msg || "");
-  if (status === 401 || /api[ _-]?key not valid|API_KEY_INVALID|api key expired|API key was reported/i.test(m)) {
-    return { fatal: true, why: "the API key was refused" };
+/*
+ * Why Google said no, in words that say what to do about it.
+ *
+ * Most refusals are about the KEY or its Google Cloud project, not about one
+ * model — a website restriction, an API restriction, the API switched off.
+ * Those fail identically on every model, so they stop the chain at once and
+ * name the fix, instead of trying five models and reporting five vague lines.
+ * Google's own message is always kept alongside, word for word.
+ */
+var GEMINI_SITE = (typeof location !== "undefined" && /^https?:/.test(location.protocol))
+  ? location.protocol + "//" + location.host + "/*" : "https://YOURNAME.github.io/*";
+
+function geminiReason(body) {
+  var e = body && body.error, out = { msg: "", reason: "", status: "" };
+  if (!e) return out;
+  out.msg = String(e.message || "");
+  out.status = String(e.status || "");
+  (e.details || []).forEach(function (d) { if (d && d.reason && !out.reason) out.reason = String(d.reason); });
+  return out;
+}
+
+function geminiClassify(status, msg, reason) {
+  var m = String(msg || ""), r = String(reason || "");
+  if (r === "API_KEY_INVALID" || /api[ _-]?key not valid/i.test(m)) {
+    return { fatal: true, why: "the key is not valid",
+      fix: "Usually a copy-paste problem. Copy it again from aistudio.google.com/apikey — " +
+        "a Gemini key starts with AIza and is 39 characters long." };
+  }
+  if (/expired/i.test(m) && /key/i.test(m)) {
+    return { fatal: true, why: "the key has expired", fix: "Make a new one at aistudio.google.com/apikey." };
+  }
+  if (r === "API_KEY_HTTP_REFERRER_BLOCKED" || /referer.*blocked|referrer.*blocked/i.test(m)) {
+    return { fatal: true, why: "the key is restricted to other websites",
+      fix: "In Google Cloud Console → APIs & Services → Credentials → this key → " +
+        "Website restrictions, add " + GEMINI_SITE + " (with the /* on the end) — or set " +
+        "Application restrictions to None." };
+  }
+  if (r === "API_KEY_IOS_APP_BLOCKED" || r === "API_KEY_ANDROID_APP_BLOCKED" ||
+      r === "API_KEY_IP_ADDRESS_BLOCKED") {
+    return { fatal: true, why: "the key is restricted to apps or IP addresses",
+      fix: "A web page can only use a key whose Application restriction is None or " +
+        "Websites. Change it in Cloud Console → Credentials → this key." };
+  }
+  if (r === "API_KEY_SERVICE_BLOCKED" || /requests to this api .*are blocked/i.test(m)) {
+    return { fatal: true, why: "the key is restricted to other APIs",
+      fix: "In Cloud Console → Credentials → this key → API restrictions, add " +
+        "“Generative Language API”, or choose Don’t restrict key." };
+  }
+  if (r === "SERVICE_DISABLED" || /has not been used in project|it is disabled/i.test(m)) {
+    return { fatal: true, why: "the Gemini API is switched off for this key's project",
+      fix: "Easiest fix: make the key at aistudio.google.com/apikey instead, which switches " +
+        "it on for you. Or enable “Generative Language API” in that Cloud project." };
+  }
+  if (/location is not supported|not available in your country/i.test(m)) {
+    return { fatal: true, why: "Google will not serve this region on this key",
+      fix: "Usually means the free tier needs billing set up for the project in AI Studio." };
+  }
+  if (status === 401) {
+    return { fatal: true, why: "this is not an API key Gemini accepts",
+      fix: "Paste a key from aistudio.google.com/apikey, not an OAuth token or service account." };
   }
   if (status === 429) return { transient: true, why: "rate limited or out of quota" };
   if (status === 503 || status === 502 || status === 504) return { transient: true, why: "overloaded" };
   if (status >= 500) return { transient: true, why: "server error" };
   if (status === 404) return { why: "not available to this key" };
-  if (status === 403) return { why: "not permitted for this key" };
-  if (status === 400) return { why: "rejected the request" };
+  if (status === 403) return { why: "not permitted (" + (r || m || "403") + ")" };
+  if (status === 400) return { why: "rejected the request (" + (m || "400") + ")" };
   return { transient: true, why: m || "failed" };
+}
+
+/*
+ * Keys pasted on a phone pick up passengers: a trailing newline, a space, a
+ * zero-width character from a notes app, curly quotes. A real key contains
+ * none of these, so they are stripped rather than sent and rejected.
+ */
+function cleanKey(k) {
+  return String(k || "").replace(/[\s ​-‍⁠﻿"'`‘’“”]/g, "");
+}
+
+/** Shape problems worth saying before the network is involved at all. */
+function keyShapeWarning(k) {
+  if (!k) return "No key yet.";
+  if (/^ya29\./.test(k)) return "That looks like an OAuth access token, not an API key.";
+  if (/^\{/.test(k) || /private_key/.test(k)) return "That looks like a service-account file, not an API key.";
+  if (!/^AIza/.test(k)) return "Gemini keys start with “AIza” — this one does not, so it is probably not the right thing.";
+  if (k.length !== 39) return "Gemini keys are 39 characters; this one is " + k.length + ", so part of it may be missing.";
+  return "";
 }
 
 function geminiOnce(model, key, prompt, timeoutMs) {
@@ -4307,6 +4385,10 @@ function geminiOnce(model, key, prompt, timeoutMs) {
   var req = fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
+    // Send the full page address as the referrer. By default a browser tells
+    // another site only the origin, so a key restricted to ".../grocer/*" never
+    // matches and every request is refused as coming from the wrong website.
+    referrerPolicy: "no-referrer-when-downgrade",
     signal: ctl ? ctl.signal : undefined,
     body: JSON.stringify({
       contents: [{ parts: [{ text: prompt }] }],
@@ -4315,12 +4397,12 @@ function geminiOnce(model, key, prompt, timeoutMs) {
   }).then(function (res) {
     return res.text().then(function (txt) {
       if (!res.ok) {
-        var msg = "HTTP " + res.status;
-        try { var j = JSON.parse(txt); if (j.error && j.error.message) msg = j.error.message; }
-        catch (e) {}
-        var c = geminiClassify(res.status, msg);
-        throw { model: model, status: res.status, msg: msg, why: c.why,
-                fatal: !!c.fatal, transient: !!c.transient };
+        var g = { msg: "", reason: "" };
+        try { g = geminiReason(JSON.parse(txt)); } catch (e) {}
+        var msg = g.msg || "HTTP " + res.status;
+        var c = geminiClassify(res.status, msg, g.reason);
+        throw { model: model, status: res.status, msg: msg, reason: g.reason, why: c.why,
+                fix: c.fix, fatal: !!c.fatal, transient: !!c.transient };
       }
       var data;
       try { data = JSON.parse(txt); }
@@ -4367,8 +4449,8 @@ function geminiOnce(model, key, prompt, timeoutMs) {
  */
 function geminiFetch(prompt, cb, onStatus) {
   var nut = nutOf();
-  var key = (nut.key || "").trim();
-  if (!key) { cb("No API key — paste one in Foods."); return; }
+  var key = cleanKey(nut.key);
+  if (!key) { cb("No API key — paste one in Plan → Foods."); return; }
   var models = geminiModels();
   var timeoutMs = Number(nut.timeoutMs) > 0 ? Number(nut.timeoutMs) : 25000;
   var tried = [];
@@ -4424,8 +4506,9 @@ function geminiFetch(prompt, cb, onStatus) {
       f = f || {};
       tried.push({ model: model, why: f.why || "failed" });
       if (f.fatal) {
-        cb("Gemini refused the key (" + (f.msg || f.why) + "). Check it under Plan → Foods.",
-          null, { tried: tried });
+        cb("Google refused the key: " + f.why + ". " + (f.fix || "") +
+          (f.msg ? " (Google said: “" + f.msg + "”)" : ""),
+          null, { tried: tried, fatal: true });
         return;
       }
       // Never keep favouring a model that has stopped answering.
@@ -4444,17 +4527,23 @@ function geminiFetch(prompt, cb, onStatus) {
  * experiments last because they are the ones that vanish.
  */
 function geminiDiscover(cb) {
-  var key = (nutOf().key || "").trim();
+  var key = cleanKey(nutOf().key);
   if (!key) { cb("Paste a key first."); return; }
-  fetch(GEMINI_BASE + "models?pageSize=200&key=" + encodeURIComponent(key))
+  fetch(GEMINI_BASE + "models?pageSize=200&key=" + encodeURIComponent(key),
+        { referrerPolicy: "no-referrer-when-downgrade" })
     .then(function (res) {
       return res.text().then(function (txt) {
         var j = null;
         try { j = JSON.parse(txt); } catch (e) {}
-        if (!res.ok) throw new Error((j && j.error && j.error.message) || "HTTP " + res.status);
+        if (!res.ok) {
+          var g = geminiReason(j);
+          var c = geminiClassify(res.status, g.msg, g.reason);
+          throw new Error(c.why + (c.fix ? ". " + c.fix : "") +
+            (g.msg ? " (Google said: “" + g.msg + "”)" : ""));
+        }
         return j || {};
       });
-    })
+    }, function () { throw new Error("could not reach Google — check the connection"); })
     .then(function (j) {
       var names = (j.models || []).filter(function (m) {
         return (m.supportedGenerationMethods || []).indexOf("generateContent") >= 0;
@@ -5391,17 +5480,30 @@ document.addEventListener("click", function (e) {
   }
   if (act === "aiFood") { aiFood(); return; }
   if (act === "findModels") {
-    var fb = $("#findModelsBtn");
+    // Listing models costs no quota, so it doubles as a key check — and the
+    // result goes in a box that stays put, because a diagnosis with steps in it
+    // is not something to read off a toast before it fades.
+    var fb = $("#findModelsBtn"), ks = $("#keyStatus");
+    var k = cleanKey(nutOf().key);
+    if (k !== nutOf().key) { nutOf().key = k; save(); }
+    var shape = keyShapeWarning(k);
     if (fb) { fb.disabled = true; fb.textContent = "Asking Google…"; }
     geminiDiscover(function (err, names) {
-      if (fb) { fb.disabled = false; fb.textContent = "Find the models my key can use"; }
-      if (err) { toast("Could not list models: " + err); return; }
+      if (fb) { fb.disabled = false; fb.textContent = "Check key and find models"; }
+      if (err) {
+        if (ks) ks.innerHTML = '<div class="note" style="margin-top:8px;display:block">' +
+          "<b>Key not working:</b> " + esc(err) +
+          (shape && !/No key/.test(shape) ? "<br><br>Also: " + esc(shape) : "") + "</div>";
+        return;
+      }
       nutOf().models = names.join(", ");
       nutOf().lastModel = "";
       save();
       var gm = $("#gemModels");
       if (gm) gm.value = names.join(", ");
-      toast(names.length + " models found. " + names[0] + " goes first.");
+      if (ks) ks.innerHTML = '<div class="note ok" style="margin-top:8px;display:block">' +
+        "<b>Key works.</b> " + names.length + " text models available; " +
+        esc(names[0]) + " will be tried first.</div>";
     });
     return;
   }
@@ -5566,7 +5668,7 @@ document.addEventListener("input", function (e) {
     return;
   }
   if (t.dataset && t.dataset.act === "geminiset") {
-    nutOf()[t.dataset.f] = t.value.trim();
+    nutOf()[t.dataset.f] = t.dataset.f === "key" ? cleanKey(t.value) : t.value.trim();
     // Reordering the list by hand is a statement of preference; do not let the
     // remembered last-good model quietly jump back in front of it.
     if (t.dataset.f === "models") nutOf().lastModel = "";
@@ -5679,7 +5781,8 @@ document.addEventListener("visibilitychange", function () {
 window.Kurv_app = { S: function () { return S; }, CAT: CAT, render: render,
   search: search, viewOf: viewOf, load: load,
   nutTouched: nutTouched, plateToday: plateToday,
-  geminiFetch: geminiFetch, geminiModels: geminiModels, geminiDiscover: geminiDiscover };
+  geminiFetch: geminiFetch, geminiModels: geminiModels, geminiDiscover: geminiDiscover,
+  cleanKey: cleanKey, keyShapeWarning: keyShapeWarning };
 })();
 </script>
 </body>
