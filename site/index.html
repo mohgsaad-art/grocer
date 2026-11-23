@@ -161,6 +161,9 @@ h2:first-child{margin-top:2px}
 
 /* ---------------------------------------------------------------- controls */
 .row{display:flex;gap:8px;margin-top:11px;align-items:stretch}
+/* A class that sets display beats the hidden attribute, so say it outright —
+   otherwise a hidden row still draws its empty button. */
+[hidden]{display:none!important}
 .btn{background:var(--ink);color:var(--paper);border-radius:8px;padding:0 14px;
   min-height:var(--tap);font-size:14px;font-weight:600;display:flex;
   align-items:center;justify-content:center;gap:7px;flex:1;text-align:center}
@@ -290,6 +293,13 @@ svg.chart{width:100%;height:148px;display:block;margin-top:4px}
 
 /* the settings sheets are long by nature */
 .sheet.tall{max-height:92vh}
+
+/* "15 kr for 500 g" — one sentence, three inputs */
+.bp{display:flex;align-items:center;gap:7px}
+.bp input{flex:1;min-width:0}
+.bp select{flex:none;width:74px}
+.bp-w{flex:none;font-size:13px;color:var(--mute)}
+.why .lnk{margin-left:4px}
 .sfilt{display:flex;flex-wrap:nowrap;gap:6px;margin:14px 0 0;padding:2px 2px 8px;
   overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;
   scroll-snap-type:x proximity;scrollbar-width:none}
@@ -473,6 +483,17 @@ nav .pip{position:absolute;top:7px;right:calc(50% - 19px);min-width:15px;height:
         <input id="itDay" type="number" min="0" step="any" inputmode="decimal"></div>
     </div>
     <div class="hint" id="itRateHint"></div>
+
+    <div class="f"><label>Most you will pay</label>
+      <div class="bp">
+        <input id="itBPrice" type="number" min="0" step="any" inputmode="decimal" placeholder="15">
+        <span class="bp-w">kr for</span>
+        <input id="itBQty" type="number" min="0" step="any" inputmode="decimal">
+        <select id="itBUnit"></select>
+      </div></div>
+    <div class="hint" id="itBudgetHint"></div>
+    <div class="row" id="itBSuggestRow" hidden>
+      <button class="btn ghost sm" data-act="bpSuggest" id="itBSuggest" style="flex:1"></button></div>
 
     <div class="f2">
       <div class="f"><label>Keeps, unopened</label>
@@ -2295,6 +2316,9 @@ function load() {
   for (var k in d) if (!(k in S)) S[k] = clone(d[k]);
   for (var sk in d.settings) if (!(sk in S.settings)) S.settings[sk] = d.settings[sk];
   if (!S.month) S.month = K.monthKeyOf();
+  // Remember what the save looked like before it is stamped current, so
+  // one-off migrations below run once and only on genuinely old data.
+  var fromV = Number(S.v) || 0;
   S.v = DEFAULTS.v;
   if (!S.nut) S.nut = clone(DEFAULTS.nut);
   if (!S.nut.targets) S.nut.targets = clone(K.NUT_DEFAULTS) || {};
@@ -2317,7 +2341,7 @@ function load() {
     // cheapest regular price there so an existing plan keeps working instead
     // of every item suddenly reporting no budget; from here on it is yours to
     // set and it stops moving when the shops do.
-    if (it.bPrice === undefined || it.bPrice === null) {
+    if (fromV < 4 && (it.bPrice === undefined || it.bPrice === null)) {
       var offs = K.offers(it, lookup);
       var lo = K.budgetUnit(offs);
       if (lo !== null && lo > 0) {
@@ -2332,10 +2356,19 @@ function load() {
 var saveTimer = null;
 function save() {
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(function () {
-    try { localStorage.setItem(LSKEY, JSON.stringify(S)); }
-    catch (e) { toast("Could not save — device storage is full."); }
-  }, 60);
+  saveTimer = setTimeout(flushSave, 60);
+}
+
+/* Write now. A save is held back 60 ms so a burst of keystrokes is one write,
+ * but iOS freezes timers the moment an app is swiped away — so tapping Save
+ * and immediately going home could lose the edit. Anything pending is written
+ * as soon as the page is hidden. */
+function flushSave() {
+  if (!saveTimer) return;
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  try { localStorage.setItem(LSKEY, JSON.stringify(S)); }
+  catch (e) { toast("Could not save — device storage is full."); }
 }
 
 /** Bring every item up to today. Cheap, and keeps stored state truthful. */
@@ -2685,7 +2718,11 @@ function cardHTML(v) {
     (d.cover > 0 ? " left" : "") + "</span></div></div>";
 
   if (d.best) h += shelfTag(d.best, it.unit);
-  if (d.reason) h += '<div class="why">' + esc(d.reason) + "</div>";
+  if (d.reason) {
+    h += '<div class="why">' + esc(d.reason) +
+      (d.needsBudget ? '<button class="lnk" data-act="editItem" data-id="' + it.id +
+        '">Set it</button>' : "") + "</div>";
+  }
 
   // Spoilage is the one thing the plan cannot see coming, so it is said plainly
   // and in the amount you would actually bin, not as a date to interpret.
@@ -2733,6 +2770,12 @@ function slimHTML(v) {
     '<span><b class="num">' + K.fmtQty(d.stock, it.unit) + "</b> " +
     K.UNIT_LABEL[it.unit] + " left</span></div>" +
     "</div>";
+  // Covered items are collapsed, but a missing budget price is still worth one
+  // line: until it is set the item is invisible to every money figure.
+  if (d.needsBudget) {
+    h += '<div class="why" style="margin-top:2px">No budget price yet' +
+      '<button class="lnk" data-act="editItem" data-id="' + it.id + '">Set it</button></div>';
+  }
   h += detailHTML(v);
   return h + "</div>";
 }
@@ -2934,7 +2977,9 @@ function remainingStarters() {
  * required; the rest fall back to sane defaults.
  */
 
-var CSV_COLS = ["name", "unit", "per_month", "shelf_life_days", "open_life_days", "reorder_days"];
+// The budget columns go last, so a six-column CSV from before still reads.
+var CSV_COLS = ["name", "unit", "per_month", "shelf_life_days", "open_life_days", "reorder_days",
+                "budget_price", "budget_qty", "budget_unit"];
 
 // Split one CSV line, honouring "quoted, fields" and "" escapes.
 function csvSplit(line) {
@@ -2984,6 +3029,10 @@ function parsePlanCSV(txt) {
               shelf_life_days: "shelf_life_days", open_life: "open_life_days",
               open_life_days: "open_life_days", once_open: "open_life_days",
               reorder: "reorder_days", reorder_days: "reorder_days",
+              budget_price: "budget_price", max_price: "budget_price", budget: "budget_price",
+              willing_to_pay: "budget_price", price: "budget_price",
+              budget_qty: "budget_qty", budget_amount: "budget_qty", per_qty: "budget_qty",
+              budget_unit: "budget_unit", per_unit: "budget_unit",
               name: "name", unit: "unit", units: "unit" }[h];
     if (k && !(k in idx)) { idx[k] = i; seen++; }
   });
@@ -3006,7 +3055,18 @@ function parsePlanCSV(txt) {
     var open = Math.round(parseFloat(get("open_life_days")));
     var reo = Math.round(parseFloat(get("reorder_days")));
 
+    // "15, 500, g" -> 15 kr for 500 g. Only kept if it makes sense for the
+    // item's unit; a gram price on an item counted in pieces is dropped.
+    var bp = parseFloat(get("budget_price").replace(",", "."));
+    var bq = parseFloat(get("budget_qty").replace(",", "."));
+    var bu = get("budget_unit").trim();
+    if (!(bq > 0)) bq = 1;
+    if (!bu) bu = K.UNIT_PER[unit];
+    var budget = isFinite(bp) && bp > 0 && K.toCanon(bq, bu, unit) > 0
+      ? { price: bp, qty: bq, unit: bu } : null;
+
     out.push({
+      budget: budget,
       name: name,
       unit: unit,
       perMonth: Math.round(per * 1000) / 1000,
@@ -3021,8 +3081,11 @@ function parsePlanCSV(txt) {
 function planToCSV() {
   var h = CSV_COLS.join(",");
   return h + "\n" + S.items.map(function (it) {
+    var has = Number(it.bPrice) > 0;
     return [it.name, K.UNIT_PER[it.unit], it.perMonth, it.shelfLife, it.openLife,
-            it.coverDays == null ? "" : it.coverDays].map(csvCell).join(",");
+            it.coverDays == null ? "" : it.coverDays,
+            has ? it.bPrice : "", has ? (it.bQty || 1) : "", has ? (it.bUnit || K.UNIT_PER[it.unit]) : ""]
+      .map(csvCell).join(",");
   }).join("\n");
 }
 
@@ -3052,7 +3115,9 @@ function previewPlanCSV() {
     h += '<div class="kv"><span>' + esc(x.name) + (dup ? " · updates" : "") + "</span>" +
       '<b class="num">' + K.fmtQty(x.perMonth, x.unit) + " " + K.UNIT_PER[x.unit] +
       " · " + x.shelfLife + "d" + (x.openLife > 0 ? "/" + x.openLife + "d" : "") +
-      (x.coverDays ? " · re " + x.coverDays + "d" : "") + "</b></div>";
+      (x.coverDays ? " · re " + x.coverDays + "d" : "") +
+      (x.budget ? " · \u2264" + K.kr(x.budget.price) + "/" + x.budget.qty + x.budget.unit : "") +
+      "</b></div>";
   });
   box.innerHTML = h;
 }
@@ -3075,11 +3140,15 @@ function applyPlanCSV() {
       ex.shelfLife = x.shelfLife;
       ex.openLife = x.openLife;
       ex.coverDays = x.coverDays;
+      // A CSV without budget columns leaves an existing price alone.
+      if (x.budget) { ex.bPrice = x.budget.price; ex.bQty = x.budget.qty; ex.bUnit = x.budget.unit; }
       updated++;
     } else {
       S.items.push({ id: uid(), name: x.name, unit: x.unit, perMonth: x.perMonth,
         shelfLife: x.shelfLife, openLife: x.openLife, coverDays: x.coverDays,
-        watch: [], lots: [], asOf: K.today(), spent: 0, saved: 0, boughtQty: 0, wasted: 0 });
+        watch: [], lots: [], asOf: K.today(), spent: 0, saved: 0, boughtQty: 0, wasted: 0,
+        bPrice: x.budget ? x.budget.price : 0, bQty: x.budget ? x.budget.qty : 0,
+        bUnit: x.budget ? x.budget.unit : "" });
       added++;
     }
   });
@@ -4779,7 +4848,7 @@ function renderPlan() {
         K.UNIT_LABEL[it.unit] + " a month · <span class=\"num\">" +
         (r > 0 ? K.fmtQty(r, it.unit) : "0") + "</span> a day · keeps " +
         it.shelfLife + " d" + (it.openLife > 0 ? ", " + it.openLife + " d once open" : "") +
-        "</div></div>" +
+        "</div>" + '<div class="lot-s">' + budgetLine(it) + "</div></div>" +
         '<button class="btn ghost sm" data-act="editItem" data-id="' + it.id + '">Edit</button>' +
         "</div>";
     });
@@ -5156,16 +5225,93 @@ function openItem(id) {
   $("#itShelf").value = it ? it.shelfLife : 30;
   $("#itOpen").value = it ? it.openLife : 0;
   $("#itCover").value = it && it.coverDays ? it.coverDays : "";
+  $("#itBPrice").value = it && Number(it.bPrice) > 0 ? it.bPrice : "";
+  $("#itBQty").value = it && Number(it.bPrice) > 0 && Number(it.bQty) > 0 ? it.bQty : "";
+  fillBudgetUnits(it && Number(it.bPrice) > 0 ? it.bUnit : null);
   $("#itUnit").innerHTML = K.CANON.map(function (u) {
     return '<button class="tg' + (SHEET.unit === u ? " on" : "") + '" data-unit="' + u + '">' +
       K.UNIT_NOUN[u] + "</button>";
   }).join("");
   $("#itDeleteRow").hidden = !it;
   itemHint();
+  budgetHint();
   openSheet("#mItem");
   if (!it) setTimeout(function () { $("#itName").focus(); }, 60);
 }
 function round3(v) { return Math.round(v * 1000) / 1000; }
+
+/*
+ * "The most I will pay for this much." Asked the way people actually think
+ * about it — 15 kr for 500 g, 3 kr for one egg — rather than as a price per
+ * kilo, because almost nobody knows their price per kilo for pasta. The app
+ * does the division.
+ */
+var BUDGET_UNITS = { kg: ["g", "kg"], L: ["ml", "L"], pc: ["stk"] };
+var BUDGET_DEFAULT = { kg: ["g", 500], L: ["L", 1], pc: ["stk", 1] };
+
+function fillBudgetUnits(want) {
+  var opts = BUDGET_UNITS[SHEET.unit] || ["stk"];
+  var pick = want && opts.indexOf(want) >= 0 ? want
+    : (want && want.toLowerCase && opts.indexOf(want.toLowerCase()) >= 0 ? want.toLowerCase()
+      : BUDGET_DEFAULT[SHEET.unit][0]);
+  // The canonical unit may be stored as "kg"/"L"/"stk"; old data wrote it that way.
+  if (opts.indexOf(pick) < 0) pick = opts[opts.length - 1];
+  $("#itBUnit").innerHTML = opts.map(function (u) {
+    return '<option value="' + u + '"' + (u === pick ? " selected" : "") + ">" +
+      (u === "stk" ? "pcs" : u) + "</option>";
+  }).join("");
+  if (!$("#itBQty").value) $("#itBQty").placeholder = String(BUDGET_DEFAULT[SHEET.unit][1]);
+}
+
+/** Read the three fields; null when blank, false when half-filled. */
+function readBudget() {
+  var price = num($("#itBPrice").value);
+  var qRaw = $("#itBQty").value;
+  var qty = qRaw === "" ? BUDGET_DEFAULT[SHEET.unit][1] : num(qRaw);
+  var unit = $("#itBUnit").value || BUDGET_DEFAULT[SHEET.unit][0];
+  if ($("#itBPrice").value === "") return null;
+  if (!isFinite(price) || price <= 0) return false;
+  var canon = K.toCanon(qty, unit, SHEET.unit);
+  if (!(canon > 0)) return false;
+  return { price: price, qty: qty, unit: unit, perUnit: price / canon };
+}
+
+function budgetHint() {
+  var box = $("#itBudgetHint");
+  if (!box) return;
+  var b = readBudget();
+  var per = num($("#itMonth").value);
+  var u = K.UNIT_PER[SHEET.unit];
+  var it = SHEET.id ? byId(SHEET.id) : null;
+
+  if (b === null) {
+    box.innerHTML = "What you would pay at a <b>normal</b> price — not on offer. It sets this " +
+      "item's monthly budget, and anything you buy for less counts as saved. Leave it blank " +
+      "and the item has no budget.";
+  } else if (b === false) {
+    box.innerHTML = '<span style="color:var(--need)">Give a price above zero and an amount, ' +
+      "for example 15 kr for 500 g.</span>";
+  } else {
+    box.innerHTML = "That is <b>" + K.kr(b.perUnit) + "/" + u + "</b>" +
+      (isFinite(per) && per > 0
+        ? ", so with " + K.fmtQty(per, SHEET.unit) + " " + K.UNIT_LABEL[SHEET.unit] +
+          " a month your budget for this is <b>" + K.kr0(b.perUnit * per) + "</b> a month."
+        : ".");
+  }
+
+  // Offer the lookout list's cheapest normal price as a starting point —
+  // offered, never applied, because the whole point is that this is your number.
+  var row = $("#itBSuggestRow"), btn = $("#itBSuggest");
+  var lo = it && it.unit === SHEET.unit ? K.budgetUnit(K.offers(it, lookup)) : null;
+  if (lo && lo > 0) {
+    row.hidden = false;
+    btn.dataset.unit = String(lo);
+    btn.textContent = "Use the cheapest normal price on your lookout list: " +
+      K.kr(lo) + "/" + u;
+  } else {
+    row.hidden = true;
+  }
+}
 
 function itemHint() {
   var m = num($("#itMonth").value);
@@ -5185,6 +5331,8 @@ function confirmItem() {
   var openL = Math.max(0, Math.round(num($("#itOpen").value)) || 0);
   var cover = Math.round(num($("#itCover").value));
   var it = SHEET.id ? byId(SHEET.id) : null;
+  var bud = readBudget();
+  if (bud === false) { toast("Most you will pay: give a price and an amount, e.g. 15 kr for 500 g."); return; }
 
   if (!it) {
     it = { id: uid(), name: name, unit: SHEET.unit, perMonth: per, shelfLife: shelf,
@@ -5192,6 +5340,7 @@ function confirmItem() {
       watch: [], lots: [], asOf: K.today(), spent: 0, saved: 0, boughtQty: 0, wasted: 0 };
     S.items.push(it);
     EXPANDED[it.id] = true;
+    setBudget(it, bud);
   } else {
     // Changing the unit would make existing pack sizes and stock meaningless.
     if (it.unit !== SHEET.unit && (it.lots.length || it.watch.length)) {
@@ -5201,10 +5350,30 @@ function confirmItem() {
     it.name = name; it.unit = SHEET.unit; it.perMonth = per;
     it.shelfLife = shelf; it.openLife = openL;
     it.coverDays = isFinite(cover) && cover > 0 ? cover : null;
+    setBudget(it, bud);
   }
   save();
   closeSheets();
   render();
+}
+
+/* Always written, never left undefined, so the one-off migration that seeds a
+ * price from the lookout list can never overwrite a choice — including the
+ * choice to have no budget, which is stored as 0. */
+function setBudget(it, b) {
+  if (b) { it.bPrice = b.price; it.bQty = b.qty; it.bUnit = b.unit; }
+  else { it.bPrice = 0; it.bQty = 0; it.bUnit = ""; }
+}
+
+/** "Up to 15 kr for 500 g · 90 kr a month", or a nudge if there is none. */
+function budgetLine(it) {
+  var bu = K.budgetUnitOf(it);
+  if (bu === null) return '<span style="color:var(--need)">No budget price yet — tap Edit</span>';
+  var q = Number(it.bQty) > 0 ? Number(it.bQty) : 1;
+  var u = it.bUnit === "stk" || !it.bUnit ? (q === 1 ? "pc" : "pcs") : it.bUnit;
+  return "Up to <span class=\"num\">" + K.kr(Number(it.bPrice)) + "</span> for " +
+    (+q.toFixed(3)) + " " + u + " · <span class=\"num\">" + K.kr0(K.budgetOf(it)) +
+    "</span> a month";
 }
 
 function deleteItem() {
@@ -5355,6 +5524,8 @@ document.addEventListener("click", function (e) {
         K.UNIT_NOUN[u] + "</button>";
     }).join("");
     itemHint();
+    fillBudgetUnits(null);
+    budgetHint();
     return;
   }
 
@@ -5462,6 +5633,16 @@ document.addEventListener("click", function (e) {
   if (act === "openStock") { openStock(id); return; }
   if (act === "confirmBuy") { confirmBuy(); return; }
   if (act === "confirmStock") { confirmStock(); return; }
+  if (act === "bpSuggest") {
+    var perU = Number(b.dataset.unit);
+    var bu = $("#itBUnit").value || BUDGET_DEFAULT[SHEET.unit][0];
+    var bq = num($("#itBQty").value);
+    if (!(bq > 0)) { bq = BUDGET_DEFAULT[SHEET.unit][1]; $("#itBQty").value = bq; }
+    var cq = K.toCanon(bq, bu, SHEET.unit);
+    if (perU > 0 && cq > 0) $("#itBPrice").value = Math.round(perU * cq * 100) / 100;
+    budgetHint();
+    return;
+  }
   if (act === "newItem") { openItem(null); return; }
   if (act === "editItem") { openItem(id); return; }
   if (act === "confirmItem") { confirmItem(); return; }
@@ -5761,17 +5942,19 @@ document.addEventListener("input", function (e) {
   if (t.id === "itMonth") {
     var m = num(t.value);
     $("#itDay").value = isFinite(m) && m > 0 ? round3(m / K.MONTH) : "";
-    itemHint(); return;
+    itemHint(); budgetHint(); return;
   }
   if (t.id === "itDay") {
     var dd = num(t.value);
     $("#itMonth").value = isFinite(dd) && dd > 0 ? round3(dd * K.MONTH) : "";
-    itemHint(); return;
+    itemHint(); budgetHint(); return;
   }
+  if (t.id === "itBPrice" || t.id === "itBQty") { budgetHint(); return; }
 });
 
 document.addEventListener("change", function (e) {
   var t = e.target;
+  if (t.id === "itBUnit") { budgetHint(); return; }
   if (t.dataset && t.dataset.act === "nutset" && t.dataset.f === "w") {
     var tgw = nutOf().targets;
     if (!tgw[t.dataset.k]) tgw[t.dataset.k] = {};
@@ -5858,14 +6041,15 @@ loadCatalog();
 
 // Coming back after midnight, or after a week away, should not show stale cover.
 document.addEventListener("visibilitychange", function () {
-  if (!document.hidden) render();
+  if (document.hidden) flushSave(); else render();
 });
+window.addEventListener("pagehide", flushSave);
 
 window.Kurv_app = { S: function () { return S; }, CAT: CAT, render: render,
   search: search, viewOf: viewOf, load: load,
   nutTouched: nutTouched, plateToday: plateToday,
   geminiFetch: geminiFetch, geminiModels: geminiModels, geminiDiscover: geminiDiscover,
-  cleanKey: cleanKey, keyShapeWarning: keyShapeWarning };
+  cleanKey: cleanKey, keyShapeWarning: keyShapeWarning, flushSave: flushSave };
 })();
 </script>
 </body>
